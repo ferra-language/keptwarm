@@ -1,1 +1,1 @@
-{ "name": "keepwarm", "version": "0.2.0", "description": "/keepwarm pings the session after 50 idle minutes to keep the 1-hour prompt cache warm", "types": "./types/index.d.ts" }
+{ "name": "embercache", "version": "0.2.1", "description": "/keepwarm pings the session after 50 idle minutes to keep the 1-hour prompt cache warm", "types": "./types/index.d.ts" }

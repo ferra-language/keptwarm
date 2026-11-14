@@ -5,7 +5,7 @@ const PING_MS = 50 * 60_000
 const PING = 'Cache keepalive from the keepwarm mod. Reply with just "ok" and do nothing else.'
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000 }
 // The deadline lives in $.state so a hot reload resumes the run instead of dropping it.
-const until = { plugin: 'keepwarm', key: 'until' } as const
+const until = { plugin: 'embercache', key: 'until' } as const
 
 let timer: { cancel(): void } | undefined
 

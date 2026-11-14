@@ -1,5 +1,5 @@
 {
-  "name": "keepwarm",
+  "name": "embercache",
   "owner": { "name": "ferra-language" },
-  "plugins": [{ "name": "keepwarm", "source": "./", "description": "/keepwarm pings the session after 50 idle minutes to keep the prompt cache warm" }]
+  "plugins": [{ "name": "embercache", "source": "./", "description": "/keepwarm pings the session after 50 idle minutes to keep the prompt cache warm" }]
 }
