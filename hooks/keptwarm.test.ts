@@ -336,7 +336,7 @@ test('a refused ping shows a failure toast and the run carries on', async ($, on
   await run('6h')
   await clock.advance(50 * MIN)
   expect(pings.length).toBe(1)
-  expect(toasts.some(t => t.includes('keptwarm: ping failed, retrying in 50 min'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: ping failed, retry at next ping'))).toBe(true)
   expect(statuses.some(t => t.includes('ping failed'))).toBe(true)
   await clock.advance(50 * MIN)
   expect(pings.length).toBe(2) // retried

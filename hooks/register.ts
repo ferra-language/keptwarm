@@ -4,7 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 const PING_MS = 50 * 60_000
 const H = 3_600_000
 const MIN = 60_000
-// A ping re-reads the cache at about a tenth of the rebuild price, so past roughly 17 idle hours it costs more than it saves.
+// A cache read costs about a twentieth of a rebuild (reads 0.1x input, a 1-hour write 2x), so past roughly 17 idle hours the pings cost more than one rebuild.
 const MAX_MS = 12 * H
 const MANUAL_MS = 6 * H
 const AUTO_MS = 3 * H
@@ -122,7 +122,7 @@ async function schedule($: EngineInterface) {
         .catch(() => {
           pingPending = false
           $.ui.status(`until ${hhmm(end, now)}, ping failed`)
-          void $.ui.toast('keptwarm: ping failed, retrying in 50 min')
+          void $.ui.toast('keptwarm: ping failed, retry at next ping')
         })
     }
     await schedule($) // keeps the chain alive if the ping never completes a turn
@@ -198,6 +198,7 @@ export const register: Register = on => {
     if (e.agentId === undefined) {
       busy = false
       await schedule($).catch(() => {
+        timer?.cancel()
         timer = undefined
         $.ui.status('error, run /keptwarm again')
         void $.ui.toast('keptwarm: stopped by an error')
