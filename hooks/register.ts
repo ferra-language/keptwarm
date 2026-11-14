@@ -2,16 +2,52 @@ import type { EngineInterface, Register } from 'claude-code'
 
 // ponytail: fixed 50-min wait (1-hour cache TTL); a ping fires only after 50 idle minutes.
 const PING_MS = 50 * 60_000
+const H = 3_600_000
+const MIN = 60_000
 // A ping re-reads the cache at about a tenth of the rebuild price, so past roughly 17 idle hours it costs more than it saves.
-const MAX_MS = 12 * 3_600_000
+const MAX_MS = 12 * H
+const MANUAL_MS = 6 * H
+const AUTO_MS = 3 * H
 const PING = 'Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.'
-const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000 }
-// The deadline lives in $.state so a hot reload resumes the run instead of dropping it.
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
+// Only a prompt a person types counts as activity: never our own pings, loops, tasks, peers or the SDK.
+const REAL_ORIGINS = ['composer', 'bridge', 'slack-ping']
+
+// Per session (survives a hot reload): the deadline, and the window it slides by.
+// win: -1 follows the saved auto setting, 0 is off for this session, n is this session's own window.
 const until = { plugin: 'keptwarm', key: 'until' } as const
+const win = { plugin: 'keptwarm', key: 'win' } as const
 
 let timer: { cancel(): void } | undefined
 let busy = false // a main-thread turn is running: it keeps the cache warm, and its end re-arms the timer
 let pingPending = false // a ping was submitted and no turn has started for it yet
+
+// Fixed formatting, so it never depends on the machine's locale.
+function hhmm(ms: number, now: number) {
+  const d = new Date(ms)
+  const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  return d.toDateString() === new Date(now).toDateString() ? t : `${DAYS[d.getDay()]} ${t}`
+}
+
+function dur(ms: number) {
+  return ms >= H ? `${+(ms / H).toFixed(1)}h` : `${Math.round(ms / MIN)}m`
+}
+
+// "2h", "30m", " 2 H " -> ms, or 0 when it is not a length from a minute to 12 hours.
+function parse(arg: string) {
+  const m = /^(\d+(?:\.\d+)?)\s*([mh])$/.exec(arg)
+  const ms = m ? Number(m[1]) * (m[2] === 'h' ? H : MIN) : 0
+  return ms >= MIN && ms <= MAX_MS ? ms : 0
+}
+
+// The window this session slides by right now, and whether it comes from auto.
+async function window_($: EngineInterface) {
+  const w = (await $.state.get(win)).value ?? -1
+  if (w >= 0) return { ms: w, isAuto: false }
+  const auto = await $.store.get('auto')
+  const ms = typeof auto === 'number' && auto > 0 ? auto : 0
+  return { ms, isAuto: ms > 0 }
+}
 
 async function stop($: EngineInterface) {
   timer?.cancel()
@@ -20,27 +56,37 @@ async function stop($: EngineInterface) {
   $.ui.status(undefined)
 }
 
+// The deadline passed with no prompt: leave the end time on the status line until the next real prompt.
+async function finish($: EngineInterface, end: number) {
+  // A prompt may have moved the deadline while we were getting here: then this run is not over.
+  if (((await $.state.get(until)).value ?? 0) !== end) return
+  timer?.cancel()
+  timer = undefined
+  await $.state.set(until, 0)
+  $.ui.status(`keptwarm: ended ${hhmm(end, end)}`)
+  void $.ui.toast('keptwarm: ended, session went idle')
+}
+
 // One timer, set PING_MS after the last activity, or at the deadline if that comes first.
 // Every await is done before the old timer is replaced, so two calls can never leave two timers.
 async function schedule($: EngineInterface) {
   const end = (await $.state.get(until)).value ?? 0
   const now = await $.clock.now()
+  const { isAuto } = await window_($)
   if (end === 0 || busy) return
   if (now >= end) {
-    await stop($)
-    void $.ui.toast('keptwarm: finished')
+    await finish($, end)
     return
   }
   timer?.cancel()
-  $.ui.status(`keptwarm until ${new Date(end).toLocaleString()}`)
+  $.ui.status(`keptwarm: warm until ${hhmm(end, now)}${isAuto ? ' (auto)' : ''}`)
   timer = $.clock.after(Math.min(PING_MS, end - now), async () => {
     // Read again: /keptwarm off or a new length may have landed while this timer waited.
     const end = (await $.state.get(until)).value ?? 0
     const now = await $.clock.now()
     if (end === 0 || busy) return
     if (now >= end - 1000) {
-      await stop($)
-      void $.ui.toast('keptwarm: finished')
+      await finish($, end)
       return
     }
     if (!pingPending) {
@@ -52,24 +98,46 @@ async function schedule($: EngineInterface) {
         })
         .catch(() => {
           pingPending = false
-          void $.ui.toast('keptwarm: ping failed')
+          $.ui.status(`keptwarm: until ${hhmm(end, now)}, ping failed`)
+          void $.ui.toast('keptwarm: ping failed, retrying in 50 min')
         })
     }
     await schedule($) // keeps the chain alive if the ping never completes a turn
   })
 }
 
+// A real prompt pushes the deadline out to now + window; the first one arms a session under auto.
+async function slide($: EngineInterface) {
+  const { ms } = await window_($)
+  if (ms === 0) {
+    // Nothing to slide by: a stale "ended" line has had its say, and a running deadline stays as it is.
+    if (((await $.state.get(until)).value ?? 0) === 0) $.ui.status(undefined)
+    return
+  }
+  await $.state.set(until, (await $.clock.now()) + ms)
+  await schedule($)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'keptwarm',
-      description: 'Keep the prompt cache warm for 6h; /keptwarm off to stop',
-      argumentHint: '[6h | 12h | 30m | off]',
+      description: 'Keep the prompt cache warm: /keptwarm, /keptwarm auto, /keptwarm off',
+      argumentHint: '[2h | off | status | auto [3h] | auto off]',
     })
     // A reload re-runs this: carry on if a run is still open.
-    if (((await $.state.get(until)).value ?? 0) > (await $.clock.now())) {
+    const end = (await $.state.get(until)).value ?? 0
+    const now = await $.clock.now()
+    if (end > now) {
       await schedule($)
-      void $.ui.toast('keptwarm: resumed after reload')
+      void $.ui.toast(`keptwarm: resumed, warm until ${hhmm(end, now)}`)
+    }
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    if (REAL_ORIGINS.includes(e.origin?.kind) && !e.command && !e.isMeta) {
+      await slide($).catch(() => {}) // never let the keepalive hold up a prompt
     }
     return next(e)
   })
@@ -90,34 +158,69 @@ export const register: Register = on => {
       busy = false
       await schedule($).catch(() => {
         timer = undefined
-        $.ui.status(undefined)
-        void $.ui.toast('keptwarm: could not re-arm, run /keptwarm again')
+        $.ui.status('keptwarm: stopped, run /keptwarm')
+        void $.ui.toast('keptwarm: could not re-arm')
       })
     }
     return next(e)
   })
 
-  // /clear ends the conversation without a new session.start: a warm cache for it is worthless.
+  // /clear ends the conversation without a new session.start. It stops the run and drops this session's own
+  // window, so auto applies to the new conversation again; "off" for this session stays off.
   on('session.end', async ($, e, next) => {
-    if (e.reason === 'clear') await stop($)
+    if (e.reason === 'clear') {
+      await stop($)
+      if (((await $.state.get(win)).value ?? -1) > 0) await $.state.set(win, -1)
+    }
     return next(e)
   })
 
   on('command.run', { command: 'keptwarm' }, async ($, e) => {
-    const arg = e.args.trim().toLowerCase() || '6h'
+    const arg = e.args.trim().toLowerCase()
+    const usage = 'Usage: /keptwarm [2h | 30m] | off | status | auto [3h] | auto off. Up to 12h.'
 
     if (arg === 'off') {
       await stop($)
-      return { text: 'off' }
-    }
-    const m = /^(\d+(?:\.\d+)?)\s*([mh])$/.exec(arg)
-    const ms = m ? Number(m[1]) * UNITS[m[2]] : 0
-    if (!(ms >= UNITS.m && ms <= MAX_MS)) {
-      return { text: 'Usage: /keptwarm (6h default) | /keptwarm 12h | /keptwarm 30m | /keptwarm off. Up to 12h.' }
+      await $.state.set(win, 0)
+      const auto = await $.store.get('auto')
+      return { text: `Off for this session.${typeof auto === 'number' && auto > 0 ? ' Auto still applies to other sessions.' : ''}` }
     }
 
+    if (arg === 'status') {
+      const end = (await $.state.get(until)).value ?? 0
+      const now = await $.clock.now()
+      const w = (await $.state.get(win)).value ?? -1
+      const { ms, isAuto } = await window_($)
+      const auto = await $.store.get('auto')
+      const session =
+        w === 0
+          ? 'off.'
+          : end <= now
+            ? 'not warm.'
+            : ms > 0
+              ? `warm until ${hhmm(end, now)}, ${dur(ms)} after your last prompt${isAuto ? ' (auto)' : ''}.`
+              : `warm until ${hhmm(end, now)}, not extended by prompts.`
+      return { text: `This session: ${session}\nAuto: ${typeof auto === 'number' && auto > 0 ? `on, ${dur(auto)}, all sessions.` : 'off.'}` }
+    }
+
+    if (arg === 'auto off') {
+      await $.store.delete('auto')
+      return { text: 'Auto off. Sessions already warm run to their end.' }
+    }
+
+    if (arg === 'auto' || arg.startsWith('auto ')) {
+      const ms = arg === 'auto' ? AUTO_MS : parse(arg.slice(5).trim())
+      if (ms === 0) return { text: usage }
+      await $.store.set('auto', ms)
+      return { text: `Auto on: every session you have not turned off stays warm ${dur(ms)} after its last prompt. Each idle session pings about hourly. /keptwarm auto off to stop.` }
+    }
+
+    const ms = arg === '' ? MANUAL_MS : parse(arg)
+    if (ms === 0) return { text: usage }
+    await $.state.set(win, ms)
     await $.state.set(until, (await $.clock.now()) + ms)
     await schedule($)
-    return { text: `on for ${arg}, pings after 50 idle minutes. /keptwarm off to stop.` }
+    const now = await $.clock.now()
+    return { text: `Warm until ${hhmm(now + ms, now)}, ${dur(ms)} after each prompt. /keptwarm off to stop.` }
   })
 }
