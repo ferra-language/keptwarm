@@ -20,9 +20,14 @@ The user scope makes `/keptwarm` available in every project. Restart a session, 
 | `/keptwarm off` | Off for this session; it stays off, even with auto on and across `/clear` |
 | `/keptwarm status` | Shows this session and the auto setting |
 | `/keptwarm auto` or `/keptwarm auto 4h` | Every session keeps itself warm, 3 hours (or the length you give) after its last prompt |
-| `/keptwarm auto off` | Turns auto off; sessions already warm run to their end |
+| `/keptwarm auto off` | Turns auto off for all sessions; sessions already warm run to their end |
+| `/keptwarm auto here` or `/keptwarm auto here 2h` | Auto only for this project (3 hours or the length you give) |
+| `/keptwarm auto drop` | Takes this project off the auto list |
+| `/keptwarm auto list` | Shows the all-sessions setting and the projects on the list, by folder name |
 
 Auto is off until you turn it on. Under auto a session arms itself on your first prompt in it, so a session you never use never pings.
+
+A project is the git repository a session runs in (the main working tree, for a worktree), or its folder when it is not in one. Which window applies, most specific first: this session's own (`/keptwarm 2h`, or `off`), then its project's, then the all-sessions one. The project list is saved as folder paths in the mod's own store, a local file under your Claude config folder; the mod sends nothing anywhere, and `auto list` and `status` show folder names only. Those replies, like any command reply, become part of the conversation, so the model sees the folder names. If two sessions change the list at the same moment, the last write wins. A home folder that is itself a git repository counts as one project. Keep the store file out of any repository you commit.
 
 ## How it behaves
 

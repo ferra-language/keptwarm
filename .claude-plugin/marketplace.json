@@ -1,5 +1,6 @@
 {
   "name": "keptwarm",
   "owner": { "name": "ferra-language" },
+  "description": "Claude Code mods by ferra-language",
   "plugins": [{ "name": "keptwarm", "source": "./", "description": "/keptwarm pings the session after 50 idle minutes to keep the prompt cache warm" }]
 }

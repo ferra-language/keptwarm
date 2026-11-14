@@ -40,12 +40,34 @@ function parse(arg: string) {
   return ms >= MIN && ms <= MAX_MS ? ms : 0
 }
 
-// The window this session slides by right now, and whether it comes from auto.
+// The project this session belongs to: its git root (the main tree's, for a worktree), else its folder.
+async function project($: EngineInterface) {
+  try {
+    return (await $.session.repo())?.root ?? (await $.session.root())
+  } catch {
+    return ''
+  }
+}
+
+// A saved window counts only if it is a length the commands could have written; anything else (a hand-edited store) is ignored.
+const valid = (v: unknown): v is number => typeof v === 'number' && v >= MIN && v <= MAX_MS
+
+// Saved per-project auto windows, path -> ms. The paths live only in the local store and are never sent or shown in full.
+async function projects($: EngineInterface): Promise<Record<string, number>> {
+  const p = await $.store.get('projects')
+  return p !== null && typeof p === 'object' && !Array.isArray(p) ? (p as Record<string, number>) : {}
+}
+
+const name = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
+
+// The window this session slides by right now (its own, else this project's, else the global auto), and whether auto gave it.
 async function window_($: EngineInterface) {
   const w = (await $.state.get(win)).value ?? -1
   if (w >= 0) return { ms: w, isAuto: false }
+  const here = (await projects($))[await project($)]
+  if (valid(here)) return { ms: here, isAuto: true }
   const auto = await $.store.get('auto')
-  const ms = typeof auto === 'number' && auto > 0 ? auto : 0
+  const ms = valid(auto) ? auto : 0
   return { ms, isAuto: ms > 0 }
 }
 
@@ -140,7 +162,7 @@ export const register: Register = on => {
       await slide($).catch(() => {}) // never let the keepalive hold up a prompt
     }
     return next(e)
-  })
+  }).catch(($, e, next) => next(e))
 
   // A running turn keeps the cache warm itself: hold the timer until it completes.
   on('turn.start', ($, e, next) => {
@@ -177,13 +199,14 @@ export const register: Register = on => {
 
   on('command.run', { command: 'keptwarm' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
-    const usage = 'Usage: /keptwarm [2h | 30m] | off | status | auto [3h] | auto off. Up to 12h.'
+    const usage = 'Usage: /keptwarm [2h | 30m] | off | status | auto [3h] | auto here [3h] | auto drop | auto list | auto off. Up to 12h.'
 
     if (arg === 'off') {
       await stop($)
       await $.state.set(win, 0)
       const auto = await $.store.get('auto')
-      return { text: `Off for this session.${typeof auto === 'number' && auto > 0 ? ' Auto still applies to other sessions.' : ''}` }
+      const autoOn = valid(auto) || Object.values(await projects($)).some(valid)
+      return { text: `Off for this session.${autoOn ? ' Auto still applies to other sessions.' : ''}` }
     }
 
     if (arg === 'status') {
@@ -191,7 +214,6 @@ export const register: Register = on => {
       const now = await $.clock.now()
       const w = (await $.state.get(win)).value ?? -1
       const { ms, isAuto } = await window_($)
-      const auto = await $.store.get('auto')
       const session =
         w === 0
           ? 'off.'
@@ -200,12 +222,52 @@ export const register: Register = on => {
             : ms > 0
               ? `warm until ${hhmm(end, now)}, ${dur(ms)} after your last prompt${isAuto ? ' (auto)' : ''}.`
               : `warm until ${hhmm(end, now)}, not extended by prompts.`
-      return { text: `This session: ${session}\nAuto: ${typeof auto === 'number' && auto > 0 ? `on, ${dur(auto)}, all sessions.` : 'off.'}` }
+      const all = await $.store.get('auto')
+      const global = valid(all) ? all : 0
+      const here = (await projects($))[await project($)]
+      const hereMs = valid(here) ? here : 0
+      const auto =
+        global && hereMs
+          ? `on, ${dur(hereMs)}, this project; ${dur(global)}, all sessions.`
+          : hereMs
+            ? `on, ${dur(hereMs)}, this project.`
+            : global
+              ? `on, ${dur(global)}, all sessions.`
+              : 'off.'
+      return { text: `This session: ${session}\nAuto: ${auto}` }
     }
 
     if (arg === 'auto off') {
       await $.store.delete('auto')
-      return { text: 'Auto off. Sessions already warm run to their end.' }
+      const listed = valid((await projects($))[await project($)])
+      return { text: `Auto off for all sessions. Sessions already warm run to their end.${listed ? ' This project is still on the list: /keptwarm auto drop.' : ''}` }
+    }
+
+    if (arg === 'auto drop') {
+      const key = await project($)
+      const ps = await projects($)
+      if (!(key in ps)) return { text: 'This project was not on the auto list.' }
+      delete ps[key]
+      await $.store.set('projects', ps)
+      return { text: 'Auto dropped for this project. Sessions already warm run to their end.' }
+    }
+
+    if (arg === 'auto list') {
+      const all = await $.store.get('auto')
+      const key = await project($)
+      const items = Object.entries(await projects($)).filter(([, ms]) => valid(ms)).map(([path, ms]) => `${name(path)} ${dur(ms)}${path === key ? ' (this one)' : ''}`)
+      return { text: `Auto, all sessions: ${valid(all) ? dur(all) : 'off'}.\nAuto, projects: ${items.length ? items.join(', ') : 'none'}.` }
+    }
+
+    if (arg === 'auto here' || arg.startsWith('auto here ')) {
+      const ms = arg === 'auto here' ? AUTO_MS : parse(arg.slice(10).trim())
+      if (ms === 0) return { text: usage }
+      const key = await project($)
+      if (key === '') return { text: 'Could not tell which project this is, so nothing was saved.' }
+      const ps = await projects($)
+      ps[key] = ms
+      await $.store.set('projects', ps)
+      return { text: `Auto on for this project: its sessions stay warm ${dur(ms)} after their last prompt. Each idle session pings about hourly. /keptwarm auto drop to stop.` }
     }
 
     if (arg === 'auto' || arg.startsWith('auto ')) {

@@ -10,7 +10,7 @@ const turn = async ($: any) => {
 }
 
 // Boots the mod on a mock clock and store; returns what the engine saw and runners for the user's actions.
-async function boot($: any, on: any, store: Record<string, unknown> = {}, opts: { now?: number; ping?: 'fail' | 'drop' } = {}) {
+async function boot($: any, on: any, store: Record<string, unknown> = {}, opts: { now?: number; ping?: 'fail' | 'drop'; project?: { current: string; repo?: string | null; root?: string } } = {}) {
   const clock = mock.clock(on, { now: opts.now })
   mock.store(on, store)
   const pings: string[] = []
@@ -30,6 +30,12 @@ async function boot($: any, on: any, store: Record<string, unknown> = {}, opts: 
   on('ui.status', (_: unknown, e: any) => (statuses.push(JSON.stringify(e)), { value: undefined }) as never)
   on('ui.toast', (_: unknown, e: any) => (toasts.push(JSON.stringify(e)), { value: undefined }) as never)
 
+  if (opts.project) {
+    const proj = opts.project
+    // `current` is the git root; `repo: null` means no repository; `root` is the session's own folder (a worktree's).
+    on('session.repo', () => ({ value: proj.repo === null ? null : { root: proj.repo ?? proj.current, remote: null, internal: false, name: null } }) as never)
+    on('session.root', () => ({ value: proj.root ?? proj.current }) as never)
+  }
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   const run = async (args: string) =>
     (await $.command.run({ command: 'keptwarm', args, origin: { kind: 'composer' } } as never)).text as string
@@ -384,11 +390,116 @@ test('a deadline moved while the run is ending is not ended', async ($, on) => {
   on('state.set', (_: unknown, e: any) => ((store[e.key] = e.value), { value: { isSet: true, version: 2 } }) as never)
   const { clock, toasts, run } = await boot($, on)
   await run('30m')
-  const deadline = store.until
+  const deadline = store.until as number
   trap = true
   await clock.advance(31 * MIN)
   expect(toasts.some(t => t.includes('ended'))).toBe(false)
   expect(store.until).toBe(deadline + H)
+})
+
+// ---- per project (fake paths only) ----
+
+test('auto here arms only sessions in that project', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { clock, pings, run, prompt } = await boot($, on, {}, { project: where })
+  expect(await run('auto here')).toContain('Auto on for this project: its sessions stay warm 3h')
+
+  where.current = '/work/beta' // another project's session
+  await $.session.end({ reason: 'other', sessionId: 'b' } as never) // the project is read again
+  await prompt()
+  await clock.advance(5 * H)
+  expect(pings.length).toBe(0)
+
+  where.current = '/work/alpha'
+  await $.session.end({ reason: 'other', sessionId: 'a' } as never)
+  await prompt()
+  await turn($)
+  await clock.advance(51 * MIN)
+  expect(pings.length).toBe(1)
+  await run('off')
+})
+
+test('a project window beats the global auto, and auto drop removes it', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { clock, pings, toasts, run, prompt } = await boot($, on, { auto: 3 * H }, { project: where })
+  await run('auto here 30m')
+  await prompt()
+  await clock.advance(31 * MIN)
+  expect(toasts.some(t => t.includes('ended'))).toBe(true) // 30m from the project, not the 3h global
+
+  expect(await run('auto drop')).toContain('Auto dropped for this project')
+  expect(await run('auto drop')).toBe('This project was not on the auto list.')
+  await run('auto off') // and the global one
+  await prompt()
+  await clock.advance(5 * H)
+  expect(pings.length).toBe(0)
+})
+
+test('status and list name projects by folder, never by full path', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { run } = await boot($, on, { auto: 3 * H, projects: { '/work/alpha': 2 * H, '/work/beta': 1 * H } }, { project: where })
+  expect(await run('status')).toBe('This session: not warm.\nAuto: on, 2h, this project; 3h, all sessions.')
+  const list = await run('auto list')
+  expect(list).toBe('Auto, all sessions: 3h.\nAuto, projects: alpha 2h (this one), beta 1h.')
+  expect(list).not.toContain('/work')
+  await run('auto here')
+  await run('auto off')
+  expect(await run('status')).toContain('Auto: on, 3h, this project.')
+  expect(await run('auto off')).toContain('This project is still on the list: /keptwarm auto drop.')
+  expect(await run('off')).toContain('Auto still applies to other sessions.') // projects count as auto too
+})
+
+test('per-project input is checked, and a session that cannot name its project saves nothing', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { run } = await boot($, on, {}, { project: where })
+  for (const arg of ['auto here 13h', 'auto here banana', 'auto here 0m']) expect(await run(arg)).toContain('Usage')
+  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+  where.current = '' // the engine could not tell
+  await $.session.end({ reason: 'other', sessionId: 'x' } as never)
+  expect(await run('auto here')).toBe('Could not tell which project this is, so nothing was saved.')
+  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+})
+
+test('the project is the repository root, else the folder, and follows a /cd at once', async ($, on) => {
+  const where: { current: string; repo?: string | null; root?: string } = { current: '/work/main', root: '/work/main-wt' }
+  const { run } = await boot($, on, {}, { project: where })
+  await run('auto here')
+  expect(await run('auto list')).toContain('Auto, projects: main 3h (this one).') // a worktree maps to the main tree's root
+
+  where.repo = null // not in a repository: the session's own folder is the project
+  where.root = '/work/plain'
+  await run('auto here 1h')
+  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: main 3h, plain 1h (this one).')
+
+  where.root = '/work/elsewhere' // a /cd with no session.end: no stale project
+  expect(await run('auto list')).not.toContain('(this one)')
+})
+
+test('auto here and auto drop leave every other project alone', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { run } = await boot($, on, {}, { project: where })
+  await run('auto here')
+  where.current = '/work/beta'
+  await run('auto here 2h')
+  expect(await run('auto list')).toContain('Auto, projects: alpha 3h, beta 2h (this one).')
+  await run('auto drop')
+  expect(await run('auto list')).toContain('Auto, projects: alpha 3h.')
+})
+
+test('a hand-edited store cannot break it or get past the 12h cap', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const store = { projects: { '/work/alpha': '7200000', '/work/beta': 1e300, '/work/gamma': -5, '/work/delta': 0 }, auto: 'soon' }
+  const { clock, pings, run, prompt } = await boot($, on, store, { project: where })
+  expect(await run('status')).toBe('This session: not warm.\nAuto: off.')
+  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+  await prompt()
+  await clock.advance(5 * H)
+  expect(pings.length).toBe(0) // a number written as a string is not a usable window
+  where.current = '/work/beta' // and 1e300 is past the 12h cap
+  await prompt()
+  await clock.advance(5 * H)
+  expect(pings.length).toBe(0)
+  expect(await run('off')).toBe('Off for this session.')
 })
 
 // ---- what the user sees ----
@@ -406,7 +517,7 @@ test('status lines and replies read as designed', async ($, on) => {
 
   expect(await run('off')).toBe('Off for this session. Auto still applies to other sessions.')
   expect(await run('status')).toMatch(/^This session: off\./)
-  expect(await run('auto off')).toBe('Auto off. Sessions already warm run to their end.')
+  expect(await run('auto off')).toBe('Auto off for all sessions. Sessions already warm run to their end.')
   expect(await run('auto 5h')).toContain('stays warm 5h after its last prompt')
   expect(await run('status')).toContain('Auto: on, 5h, all sessions.')
   await run('auto off')
