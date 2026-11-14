@@ -58,6 +58,8 @@ Auto and project are off until you turn them on. Under auto or project a session
 ## What it runs, sends and stores
 
 - **The ping** is this exact message, submitted as a normal prompt in the session: `Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.` It adds that message and a short reply to the conversation. It is a real turn, so in a mode that auto-approves tools the model could in principle act on it; the text asks it to reply "ok" only.
+- **What goes into the prompt:** only that fixed sentence. The mod never copies your conversation, files, folder names or any other data into a prompt it submits, so a ping cannot carry anything out.
+- **What it listens to:** it hooks `prompt.submit` only to see where each prompt came from (typed by you, or automatic) and whether it is a slash command. It never reads or changes the prompt text; every prompt passes through untouched. It also hooks turn start and end, `/clear` and session start to time the pings, and registers the `/keptwarm` command.
 - **Network:** the mod makes no network requests of its own and has no telemetry. The only thing that leaves your machine is the ping, which goes to Claude like any prompt you type.
 - **Stored locally:** the auto length and the project list (folder paths with their window) in the mod's own store, a `keptwarm_*.json` file in the `plugins/store` folder under your Claude config folder. To reset it, run `/keptwarm auto off` and `/keptwarm project off` in each listed project, or delete that file. `status` shows folder names only, and like any command reply it becomes part of the conversation, so the model sees those names. Keep the store file out of any repository you commit.
 - It does not read your conversation, memory or files.
