@@ -1,22 +1,22 @@
-# embercache
+# keptwarm
 
-A Claude Code mod (command: `/keepwarm`) that keeps your session's prompt cache warm. The cache lasts one hour after the last request, so `/keepwarm` sends one tiny ping after 50 idle minutes. That keeps a long, paused session from paying to rebuild its whole context when you come back.
+A Claude Code mod that keeps your session's prompt cache warm. The cache lasts one hour after the last request, so `/keptwarm` sends one tiny ping after 50 idle minutes. That keeps a long, paused session from paying to rebuild its whole context when you come back.
 
 ## Install
 
 In a terminal session:
 
 ```
-/plugin install embercache --marketplace ferra-language/embercache
+/plugin install keptwarm --marketplace ferra-language/keptwarm
 ```
 
 Answer `y` to add the marketplace, then pick the user scope so it works in every project.
 
 ## Use
 
-- `/keepwarm` runs for 6 hours.
-- `/keepwarm 12h` or `/keepwarm 30m` sets another length.
-- `/keepwarm off` stops it.
+- `/keptwarm` runs for 6 hours.
+- `/keptwarm 12h` or `/keptwarm 30m` sets another length.
+- `/keptwarm off` stops it.
 
 ## How it behaves
 

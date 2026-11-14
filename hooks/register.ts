@@ -2,10 +2,10 @@ import type { EngineInterface, Register } from 'claude-code'
 
 // ponytail: fixed 50-min wait (1-hour cache TTL); a ping fires only after 50 idle minutes.
 const PING_MS = 50 * 60_000
-const PING = 'Cache keepalive from the keepwarm mod. Reply with just "ok" and do nothing else.'
+const PING = 'Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.'
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000 }
 // The deadline lives in $.state so a hot reload resumes the run instead of dropping it.
-const until = { plugin: 'embercache', key: 'until' } as const
+const until = { plugin: 'keptwarm', key: 'until' } as const
 
 let timer: { cancel(): void } | undefined
 
@@ -22,11 +22,11 @@ async function schedule($: EngineInterface) {
   timer = undefined
   const end = (await $.state.get(until)).value ?? 0
   if ((await $.clock.now()) >= end) return
-  $.ui.status(`keepwarm until ${new Date(end).toLocaleTimeString()}`)
+  $.ui.status(`keptwarm until ${new Date(end).toLocaleTimeString()}`)
   timer = $.clock.after(PING_MS, async () => {
     if ((await $.clock.now()) + PING_MS > end) {
       await stop($)
-      void $.ui.toast('keepwarm: finished')
+      void $.ui.toast('keptwarm: finished')
       return
     }
     void $.prompt.submit({ text: PING })
@@ -37,14 +37,14 @@ async function schedule($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
-      name: 'keepwarm',
-      description: 'Keep the prompt cache warm for 6h; /keepwarm off to stop',
+      name: 'keptwarm',
+      description: 'Keep the prompt cache warm for 6h; /keptwarm off to stop',
       argumentHint: '[12h | 30m | off]',
     })
     // A reload re-runs this: carry on if a run is still open.
     if (((await $.state.get(until)).value ?? 0) > (await $.clock.now())) {
       await schedule($)
-      void $.ui.toast('keepwarm: resumed after reload')
+      void $.ui.toast('keptwarm: resumed after reload')
     }
     return next(e)
   })
@@ -54,18 +54,18 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'keepwarm' }, async ($, e) => {
+  on('command.run', { command: 'keptwarm' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase() || '6h'
 
     if (arg === 'off') {
       await stop($)
-      return { text: 'keepwarm: off' }
+      return { text: 'keptwarm: off' }
     }
     const m = /^(\d+(?:\.\d+)?)\s*([mh])$/.exec(arg)
-    if (!m) return { text: 'Usage: /keepwarm (6h default) | /keepwarm 12h | /keepwarm off' }
+    if (!m) return { text: 'Usage: /keptwarm (6h default) | /keptwarm 12h | /keptwarm off' }
 
     await $.state.set(until, (await $.clock.now()) + Number(m[1]) * UNITS[m[2]])
     await schedule($)
-    return { text: `keepwarm: on for ${arg}, pings after 50 idle minutes. /keepwarm off to stop.` }
+    return { text: `keptwarm: on for ${arg}, pings after 50 idle minutes. /keptwarm off to stop.` }
   })
 }

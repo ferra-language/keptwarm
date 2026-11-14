@@ -5,7 +5,7 @@ const MIN = 60_000
 test('pings after 50 idle minutes, skips when active, stops at the deadline', async ($, on) => {
   const clock = mock.clock(on)
   const pings: string[] = []
-  on('command.register', () => ({ value: { command: 'keepwarm' } }))
+  on('command.register', () => ({ value: { command: 'keptwarm' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_, e) => (pings.push(e.text), { text: e.text }))
   on('turn.complete', () => ({ text: 'x' }) as never)
@@ -13,7 +13,7 @@ test('pings after 50 idle minutes, skips when active, stops at the deadline', as
   on('ui.toast', () => ({ value: undefined }) as never)
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
-  await $.command.run({ command: 'keepwarm', args: '3h', origin: { kind: 'composer' } } as never)
+  await $.command.run({ command: 'keptwarm', args: '3h', origin: { kind: 'composer' } } as never)
 
   await clock.advance(49 * MIN)
   expect(pings.length).toBe(0)
