@@ -67,7 +67,7 @@ test('off stops it, and a stale timer cannot ping after', async ($, on) => {
 
 test('bad or out-of-range input is refused and starts nothing', async ($, on) => {
   const { clock, pings, run } = await boot($, on)
-  for (const arg of ['banana', '0h', '0m', '0.0h', '-3h', '25h', '99999999999h']) {
+  for (const arg of ['banana', '0h', '0m', '0.0h', '0.5m', '-3h', '25h', '99999999999h']) {
     expect(await run(arg)).toContain('Usage')
   }
   await clock.advance(200 * MIN)
@@ -94,6 +94,40 @@ test('a reload resumes an open run', async ($, on) => {
   expect(toasts.some(t => t.includes('resumed'))).toBe(true)
   await clock.advance(51 * MIN)
   expect(pings.length).toBe(1)
+})
+
+test('off stays off: a later finished turn does not re-arm the pings', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  await run('off')
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  await clock.advance(120 * MIN)
+  expect(pings.length).toBe(0)
+})
+
+test('a running turn holds the ping until it completes', async ($, on) => {
+  on('turn.start', (_: unknown, e: any) => ({ turnId: e.turnId }) as never)
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  await clock.advance(40 * MIN)
+  await $.turn.start({ text: 'long job', turnId: 't1', agentId: undefined } as never)
+  await clock.advance(30 * MIN) // minute 70: the turn is still running
+  expect(pings.length).toBe(0)
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  await clock.advance(49 * MIN)
+  expect(pings.length).toBe(0)
+  await clock.advance(1 * MIN)
+  expect(pings.length).toBe(1)
+  await run('off')
+})
+
+test('/clear ends the run', async ($, on) => {
+  on('session.end', (_: unknown, e: any) => ({ sessionId: e.sessionId }) as never)
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
+  await clock.advance(120 * MIN)
+  expect(pings.length).toBe(0)
 })
 
 test('a subagent turn does not move the ping', async ($, on) => {

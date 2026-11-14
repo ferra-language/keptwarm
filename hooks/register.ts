@@ -60,8 +60,23 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A running turn keeps the cache warm itself: hold the timer until it completes.
+  on('turn.start', ($, e, next) => {
+    if (e.agentId === undefined) {
+      timer?.cancel()
+      timer = undefined
+    }
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined) await schedule($)
+    if (e.agentId === undefined) await schedule($).catch(() => {})
+    return next(e)
+  })
+
+  // /clear ends the conversation without a new session.start: a warm cache for it is worthless.
+  on('session.end', async ($, e, next) => {
+    if (e.reason === 'clear') await stop($)
     return next(e)
   })
 
@@ -74,7 +89,7 @@ export const register: Register = on => {
     }
     const m = /^(\d+(?:\.\d+)?)\s*([mh])$/.exec(arg)
     const ms = m ? Number(m[1]) * UNITS[m[2]] : 0
-    if (!(ms > 0 && ms <= MAX_MS)) {
+    if (!(ms >= UNITS.m && ms <= MAX_MS)) {
       return { text: 'Usage: /keptwarm (6h default) | /keptwarm 12h | /keptwarm 30m | /keptwarm off. Up to 24h.' }
     }
 
