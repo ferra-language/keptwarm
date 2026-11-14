@@ -222,6 +222,8 @@ export const register: Register = on => {
     const usage = 'Usage: /keptwarm [2h], off, status, auto [3h], auto here [3h], auto here off, auto off. Lengths up to 12h.'
     const others = (stopped: boolean) => `${stopped ? 'This session stopped too; other' : 'Other'} sessions stay warm until their current stop time.`
 
+    if (arg === 'help' || arg === '?') return { text: usage }
+
     if (arg === 'off') {
       await stop($)
       await $.state.set(win, 0)

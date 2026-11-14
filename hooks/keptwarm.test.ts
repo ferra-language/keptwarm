@@ -103,6 +103,8 @@ test('off stops it, and a stale timer cannot ping after', async ($, on) => {
 
 test('bad or out-of-range input is refused and starts nothing', async ($, on) => {
   const { clock, pings, run } = await boot($, on)
+  expect(await run('help')).toContain('Usage')
+  expect(await run('?')).toContain('Usage')
   for (const arg of ['banana', '0h', '0m', '0.0h', '0.5m', '-3h', '13h', '99999999999h', 'auto 13h', 'auto banana']) {
     expect(await run(arg)).toContain('Usage')
   }

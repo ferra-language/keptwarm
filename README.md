@@ -2,6 +2,16 @@
 
 A Claude Code mod that keeps your session's prompt cache warm. With the 1-hour cache, a session that sits idle goes cold and has to pay to rebuild its whole context when you come back. `/keptwarm` sends one tiny ping after 50 idle minutes so that does not happen.
 
+## Quick start
+
+```
+/keptwarm           keep this session warm, 6 hours after your last prompt
+/keptwarm auto      do that for every session, starting when you type in it
+/keptwarm off       stop, for this session
+/keptwarm status    what is on or off right now
+/keptwarm help      the full list of commands
+```
+
 ## Install
 
 ```
@@ -19,6 +29,7 @@ The user scope makes `/keptwarm` available in every project. Restart a session, 
 | `/keptwarm 2h` or `/keptwarm 30m` | The same with another window, from a minute to 12 hours |
 | `/keptwarm off` | Off for this session; it stays off, even with auto on and across `/clear` |
 | `/keptwarm status` | Shows this session, the auto setting and the projects on the list |
+| `/keptwarm help` | Prints the list of commands |
 | `/keptwarm auto` or `/keptwarm auto 4h` | Every session keeps itself warm, 3 hours (or the length you give) after its last prompt |
 | `/keptwarm auto off` | Turns auto off for all sessions. This session stops too if only auto was running it; other sessions stay warm until their current stop time |
 | `/keptwarm auto here` or `/keptwarm auto here 2h` | Auto only for this project (3 hours or the length you give) |
