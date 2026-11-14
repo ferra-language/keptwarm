@@ -30,14 +30,14 @@ The user scope makes `/keptwarm` available in every project. Restart a session, 
 | `/keptwarm off` | Off for this session; it stays off, even with auto on and across `/clear` |
 | `/keptwarm status` | Shows this session, the auto setting and the projects on the list |
 | `/keptwarm help` | Prints the list of commands |
+| `/keptwarm project` or `/keptwarm project 2h` | Every session in this project keeps itself warm after you type in it (3 hours or the length you give) |
+| `/keptwarm project off` | Takes this project off the list |
 | `/keptwarm auto` or `/keptwarm auto 4h` | Every session keeps itself warm, 3 hours (or the length you give) after its last prompt |
 | `/keptwarm auto off` | Turns auto off for all sessions. This session stops too if only auto was running it; other sessions stay warm until their current stop time |
-| `/keptwarm auto here` or `/keptwarm auto here 2h` | Auto only for this project (3 hours or the length you give) |
-| `/keptwarm auto here off` | Takes this project off the auto list |
 
-Auto is off until you turn it on. Under auto a session arms itself on your first prompt in it, so a session you never use never pings. While auto applies to a session that is not running yet, the status line says `keptwarm: auto on, starts when you type`. The `⚠` the engine draws before a plugin's status line is not an error; the mod cannot change it.
+Auto and project are off until you turn them on. Under auto or project a session arms itself on your first prompt in it, so a session you never use never pings. While one of them applies to a session that is not running yet, the status line says `keptwarm: auto on, starts when you type`. The `⚠` the engine draws before a plugin's status line is not an error; the mod cannot change it.
 
-A project is the git repository a session runs in (the main working tree, for a worktree), or its folder when it is not in one. Which window applies, most specific first: this session's own (`/keptwarm 2h`, or `off`), then its project's, then the all-sessions one. The project list is saved as folder paths in the mod's own store, a local file under your Claude config folder; the mod sends nothing anywhere, and `status` shows folder names only. That reply, like any command reply, becomes part of the conversation, so the model sees the folder names. If two sessions change the list at the same moment, the last write wins. A home folder that is itself a git repository counts as one project. Keep the store file out of any repository you commit.
+`project` acts on the project you are in. A project is the git repository a session runs in (the main working tree, for a worktree), or its folder when it is not in one. Which window applies, most specific first: this session's own (`/keptwarm 2h`, or `off`), then its project's, then the all-sessions one. The project list is saved as folder paths in the mod's own store, a local file under your Claude config folder; the mod sends nothing anywhere, and `status` shows folder names only. That reply, like any command reply, becomes part of the conversation, so the model sees the folder names. If two sessions change the list at the same moment, the last write wins. A home folder that is itself a git repository counts as one project. Keep the store file out of any repository you commit.
 
 ## How it behaves
 

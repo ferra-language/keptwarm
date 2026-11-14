@@ -386,9 +386,9 @@ test('auto off leaves a session you started yourself alone, and so does dropping
 
   await $.session.end({ reason: 'clear', sessionId: 'c' } as never) // a fresh conversation: its own 2h window is dropped, it follows auto again
   await run('auto') // back on for all sessions
-  await run('auto here 1h')
+  await run('project 1h')
   await prompt() // armed under the project's 1h window
-  expect(await run('auto here off')).toBe('Auto is off for this project. Other sessions stay warm until their current stop time.')
+  expect(await run('project off')).toBe('Auto is off for this project. Other sessions stay warm until their current stop time.')
   await clock.advance(121 * MIN)
   expect(pings.length).toBeGreaterThan(1) // all-sessions auto still applies, so it was not stopped
 })
@@ -428,10 +428,10 @@ test('a deadline moved while the run is ending is not ended', async ($, on) => {
 
 // ---- per project (fake paths only) ----
 
-test('auto here arms only sessions in that project', async ($, on) => {
+test('project arms only sessions in that project', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { clock, pings, run, prompt } = await boot($, on, {}, { project: where })
-  expect(await run('auto here')).toContain('Auto is on for this project. Its sessions keep their cache warm for 3h after your last prompt in them')
+  expect(await run('project')).toContain('Auto is on for this project. Its sessions keep their cache warm for 3h after your last prompt in them')
 
   where.current = '/work/beta' // another project's session
   await $.session.end({ reason: 'other', sessionId: 'b' } as never) // the project is read again
@@ -451,13 +451,13 @@ test('auto here arms only sessions in that project', async ($, on) => {
 test('a project window beats the global auto, and auto drop removes it', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { clock, pings, toasts, run, prompt } = await boot($, on, { auto: 3 * H }, { project: where })
-  await run('auto here 30m')
+  await run('project 30m')
   await prompt()
   await clock.advance(31 * MIN)
   expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true) // 30m from the project, not the 3h global
 
-  expect(await run('auto here off')).toContain('Auto is off for this project')
-  expect(await run('auto here off')).toBe('This project was not on the auto list.')
+  expect(await run('project off')).toContain('Auto is off for this project')
+  expect(await run('project off')).toBe('This project was not on the auto list.')
   await run('auto off') // and the global one
   await prompt()
   await clock.advance(5 * H)
@@ -470,47 +470,47 @@ test('status names projects by folder, never by full path', async ($, on) => {
   const status = await run('status')
   expect(status).toBe('This session: idle; your next prompt starts it again (2h).\nAuto: 2h in this project, 3h everywhere else.\nAuto projects: alpha 2h (this one), beta 1h.')
   expect(status).not.toContain('/work')
-  await run('auto here')
+  await run('project')
   await run('auto off')
   expect(await run('status')).toContain('Auto: 3h in this project.')
-  expect(await run('auto off')).toContain('This project is still on the list: /keptwarm auto here off.')
+  expect(await run('auto off')).toContain('This project is still on the list: /keptwarm project off.')
   expect(await run('off')).toContain('Auto still applies to other sessions.') // projects count as auto too
 })
 
 test('per-project input is checked, and a session that cannot name its project saves nothing', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { run } = await boot($, on, {}, { project: where })
-  for (const arg of ['auto here 13h', 'auto here banana', 'auto here 0m']) expect(await run(arg)).toContain('Usage')
+  for (const arg of ['project 13h', 'project banana', 'project 0m', 'auto here']) expect(await run(arg)).toContain('Usage')
   expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
   where.current = '' // the engine could not tell
   await $.session.end({ reason: 'other', sessionId: 'x' } as never)
-  expect(await run('auto here')).toBe('Could not tell which project this is, so nothing was saved.')
+  expect(await run('project')).toBe('Could not tell which project this is, so nothing was saved.')
   expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
 })
 
 test('the project is the repository root, else the folder, and follows a /cd at once', async ($, on) => {
   const where: { current: string; repo?: string | null; root?: string } = { current: '/work/main', root: '/work/main-wt' }
   const { run } = await boot($, on, {}, { project: where })
-  await run('auto here')
+  await run('project')
   expect(await run('status')).toContain('Auto projects: main 3h (this one).') // a worktree maps to the main tree's root
 
   where.repo = null // not in a repository: the session's own folder is the project
   where.root = '/work/plain'
-  await run('auto here 1h')
+  await run('project 1h')
   expect(await run('status')).toContain('Auto projects: main 3h, plain 1h (this one).')
 
   where.root = '/work/elsewhere' // a /cd with no session.end: no stale project
   expect(await run('status')).not.toContain('(this one)')
 })
 
-test('auto here and auto drop leave every other project alone', async ($, on) => {
+test('project and auto drop leave every other project alone', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { run } = await boot($, on, {}, { project: where })
-  await run('auto here')
+  await run('project')
   where.current = '/work/beta'
-  await run('auto here 2h')
+  await run('project 2h')
   expect(await run('status')).toContain('Auto projects: alpha 3h, beta 2h (this one).')
-  await run('auto here off')
+  await run('project off')
   expect(await run('status')).toContain('Auto projects: alpha 3h.')
 })
 
@@ -547,15 +547,15 @@ test('no auto, no line: an off session shows nothing', async ($, on) => {
 test('the waiting line follows the auto commands and clears when auto does', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { statuses, run } = await boot($, on, {}, { project: where })
-  await run('auto here')
+  await run('project')
   expect(last(statuses)).toContain('"auto on, starts when you type"')
-  await run('auto here off')
+  await run('project off')
   expect(last(statuses)).toBe('{}') // the status was cleared
   await run('auto')
   expect(last(statuses)).toContain('starts when you type')
   await run('off') // off for this session: auto no longer applies to it
   expect(last(statuses)).toBe('{}')
-  await run('auto here') // changing auto while this session is off must not show it as waiting
+  await run('project') // changing auto while this session is off must not show it as waiting
   expect(last(statuses)).toBe('{}')
   await run('auto off')
 })

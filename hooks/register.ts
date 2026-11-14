@@ -162,7 +162,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'keptwarm',
       description: 'Keep the prompt cache warm: /keptwarm, /keptwarm auto, /keptwarm off',
-      argumentHint: '[2h | off | status | auto [3h] | auto here [3h] | auto here off | auto off]',
+      argumentHint: '[2h | off | status | project [3h] | project off | auto [3h] | auto off]',
     })
     // A reload re-runs this: carry on if a run is still open.
     const end = (await $.state.get(until)).value ?? 0
@@ -219,7 +219,7 @@ export const register: Register = on => {
 
   on('command.run', { command: 'keptwarm' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
-    const usage = 'Usage: /keptwarm [2h], off, status, auto [3h], auto here [3h], auto here off, auto off. Lengths up to 12h.'
+    const usage = 'Usage: /keptwarm [2h], off, status, project [3h], project off, auto [3h], auto off. Lengths up to 12h.'
     const others = (stopped: boolean) => `${stopped ? 'This session stopped too; other' : 'Other'} sessions stay warm until their current stop time.`
 
     if (arg === 'help' || arg === '?') return { text: usage }
@@ -270,10 +270,10 @@ export const register: Register = on => {
       await $.store.delete('auto')
       const stopped = await afterAutoChange($)
       const listed = valid((await projects($))[await project($)])
-      return { text: `Auto is off for all sessions. ${others(stopped)}${listed ? ' This project is still on the list: /keptwarm auto here off.' : ''}` }
+      return { text: `Auto is off for all sessions. ${others(stopped)}${listed ? ' This project is still on the list: /keptwarm project off.' : ''}` }
     }
 
-    if (arg === 'auto here off') {
+    if (arg === 'project off') {
       const key = await project($)
       const ps = await projects($)
       if (!(key in ps)) return { text: 'This project was not on the auto list.' }
@@ -283,8 +283,8 @@ export const register: Register = on => {
       return { text: `Auto is off for this project. ${others(stopped)}` }
     }
 
-    if (arg === 'auto here' || arg.startsWith('auto here ')) {
-      const ms = arg === 'auto here' ? AUTO_MS : parse(arg.slice(10).trim())
+    if (arg === 'project' || arg.startsWith('project ')) {
+      const ms = arg === 'project' ? AUTO_MS : parse(arg.slice(8).trim())
       if (ms === 0) return { text: usage }
       const key = await project($)
       if (key === '') return { text: 'Could not tell which project this is, so nothing was saved.' }
@@ -292,7 +292,7 @@ export const register: Register = on => {
       ps[key] = ms
       await $.store.set('projects', ps)
       await afterAutoChange($)
-      return { text: `Auto is on for this project. Its sessions keep their cache warm for ${dur(ms)} after your last prompt in them; sessions you turned off stay off. Stop with /keptwarm auto here off.` }
+      return { text: `Auto is on for this project. Its sessions keep their cache warm for ${dur(ms)} after your last prompt in them; sessions you turned off stay off. Stop with /keptwarm project off.` }
     }
 
     if (arg === 'auto' || arg.startsWith('auto ')) {
