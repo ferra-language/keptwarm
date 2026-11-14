@@ -2,6 +2,12 @@ import { expect, mock, test } from 'claude-code/testing'
 
 const MIN = 60_000
 
+// One main-thread turn, start to finish.
+const turn = async ($: any) => {
+  await $.turn.start({ text: 'ping', turnId: 't', agentId: undefined } as never)
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'ok' } as never)
+}
+
 // Boots the mod on a mock clock; returns what the engine saw and a runner for /keptwarm.
 async function boot($: any, on: any) {
   const clock = mock.clock(on)
@@ -11,6 +17,7 @@ async function boot($: any, on: any) {
   on('session.start', (_: unknown, e: any) => ({ cwd: e.cwd }))
   on('prompt.submit', (_: unknown, e: any) => (pings.push(e.text), { text: e.text }))
   on('turn.complete', () => ({ text: 'x' }) as never)
+  on('turn.start', (_: unknown, e: any) => ({ turnId: e.turnId }) as never)
   on('ui.status', () => ({ value: undefined }) as never)
   on('ui.toast', (_: unknown, e: any) => (toasts.push(JSON.stringify(e)), { value: undefined }) as never)
 
@@ -34,9 +41,14 @@ test('pings after 50 idle minutes, a finished turn pushes it back, the deadline 
   expect(pings.length).toBe(0)
   await clock.advance(1 * MIN) // minute 99: 50 idle
   expect(pings.length).toBe(1)
+  await turn($) // the ping's own turn: its end re-arms the timer
+
+  await clock.advance(50 * MIN) // minute 149
+  expect(pings.length).toBe(2)
+  await turn($)
 
   await clock.advance(300 * MIN)
-  expect(pings.length).toBeLessThanOrEqual(3) // never pings once the deadline is past
+  expect(pings.length).toBe(2) // the deadline (minute 180) is past: no third ping
   expect(toasts.some(t => t.includes('finished'))).toBe(true)
 })
 
@@ -60,14 +72,14 @@ test('off stops it, and a stale timer cannot ping after', async ($, on) => {
   const { clock, pings, run } = await boot($, on)
   await run('6h')
   await clock.advance(40 * MIN)
-  expect(await run('off')).toBe('keptwarm: off')
+  expect(await run('off')).toBe('off')
   await clock.advance(300 * MIN)
   expect(pings.length).toBe(0)
 })
 
 test('bad or out-of-range input is refused and starts nothing', async ($, on) => {
   const { clock, pings, run } = await boot($, on)
-  for (const arg of ['banana', '0h', '0m', '0.0h', '0.5m', '-3h', '25h', '99999999999h']) {
+  for (const arg of ['banana', '0h', '0m', '0.0h', '0.5m', '-3h', '13h', '99999999999h']) {
     expect(await run(arg)).toContain('Usage')
   }
   await clock.advance(200 * MIN)
@@ -106,7 +118,6 @@ test('off stays off: a later finished turn does not re-arm the pings', async ($,
 })
 
 test('a running turn holds the ping until it completes', async ($, on) => {
-  on('turn.start', (_: unknown, e: any) => ({ turnId: e.turnId }) as never)
   const { clock, pings, run } = await boot($, on)
   await run('6h')
   await clock.advance(40 * MIN)
@@ -128,6 +139,30 @@ test('/clear ends the run', async ($, on) => {
   await $.session.end({ reason: 'clear', sessionId: 's1' } as never)
   await clock.advance(120 * MIN)
   expect(pings.length).toBe(0)
+})
+
+test('a ping is not stacked while the previous one is still queued', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  await clock.advance(50 * MIN)
+  expect(pings.length).toBe(1)
+  await clock.advance(150 * MIN) // the session never went idle: no turn started for the ping
+  expect(pings.length).toBe(1)
+  await run('off')
+})
+
+test('a turn that starts while the timer is being re-armed wins the race', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  const first = $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  await $.turn.start({ text: 'queued prompt', turnId: 'b', agentId: undefined } as never)
+  await first
+  await clock.advance(120 * MIN) // turn b is still running: no ping may fire inside it
+  expect(pings.length).toBe(0)
+  await $.turn.complete({ agentId: undefined, reason: 'aborted', answer: '' } as never) // aborted turns re-arm too
+  await clock.advance(51 * MIN)
+  expect(pings.length).toBe(1)
+  await run('off')
 })
 
 test('a subagent turn does not move the ping', async ($, on) => {
