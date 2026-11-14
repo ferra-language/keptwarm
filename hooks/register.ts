@@ -82,11 +82,12 @@ async function stop($: EngineInterface) {
 async function finish($: EngineInterface, end: number) {
   // A prompt may have moved the deadline while we were getting here: then this run is not over.
   if (((await $.state.get(until)).value ?? 0) !== end) return
+  const { ms } = await window_($)
   timer?.cancel()
   timer = undefined
   await $.state.set(until, 0)
-  $.ui.status(`keptwarm: ended ${hhmm(end, end)}`)
-  void $.ui.toast('keptwarm: ended, session went idle')
+  $.ui.status(`ended ${hhmm(end, end)}${ms > 0 ? ', type to restart' : ''}`)
+  void $.ui.toast('keptwarm: stopped, no prompts for a while')
 }
 
 // One timer, set PING_MS after the last activity, or at the deadline if that comes first.
@@ -101,11 +102,11 @@ async function schedule($: EngineInterface) {
     return
   }
   timer?.cancel()
-  $.ui.status(`keptwarm: warm until ${hhmm(end, now)}${isAuto ? ' (auto)' : ''}`)
+  $.ui.status(`warm until ${hhmm(end, now)}${isAuto ? ' (auto)' : ''}`)
   timer = $.clock.after(Math.min(PING_MS, end - now), async () => {
     // Read again: /keptwarm off or a new length may have landed while this timer waited.
-    const end = (await $.state.get(until)).value ?? 0
     const now = await $.clock.now()
+    const end = (await $.state.get(until)).value ?? 0 // read last: an off or a new length that landed earlier wins
     if (end === 0 || busy) return
     if (now >= end - 1000) {
       await finish($, end)
@@ -120,7 +121,7 @@ async function schedule($: EngineInterface) {
         })
         .catch(() => {
           pingPending = false
-          $.ui.status(`keptwarm: until ${hhmm(end, now)}, ping failed`)
+          $.ui.status(`until ${hhmm(end, now)}, ping failed`)
           void $.ui.toast('keptwarm: ping failed, retrying in 50 min')
         })
     }
@@ -140,12 +141,28 @@ async function slide($: EngineInterface) {
   await schedule($)
 }
 
+// Whenever auto changes for this session (a command, a start, a /clear): stop the run if it is running but no window applies
+// any more (and say so by returning true); otherwise show whether auto will start it on your next prompt. Other sessions
+// cannot be reached from here and stay warm until their current stop time.
+async function afterAutoChange($: EngineInterface) {
+  const end = (await $.state.get(until)).value ?? 0
+  const w = (await $.state.get(win)).value ?? -1
+  const { ms } = await window_($) // a session's own window (/keptwarm 2h) counts, so a manual run is never stopped here
+  if (end > (await $.clock.now())) {
+    if (ms > 0) return false
+    await stop($)
+    return true
+  }
+  $.ui.status(w === -1 && ms > 0 ? 'auto on, starts when you type' : undefined)
+  return false
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'keptwarm',
       description: 'Keep the prompt cache warm: /keptwarm, /keptwarm auto, /keptwarm off',
-      argumentHint: '[2h | off | status | auto [3h] | auto off]',
+      argumentHint: '[2h | off | status | auto [3h] | auto here [3h] | auto here off | auto off]',
     })
     // A reload re-runs this: carry on if a run is still open.
     const end = (await $.state.get(until)).value ?? 0
@@ -153,6 +170,8 @@ export const register: Register = on => {
     if (end > now) {
       await schedule($)
       void $.ui.toast(`keptwarm: resumed, warm until ${hhmm(end, now)}`)
+    } else {
+      await afterAutoChange($).catch(() => {})
     }
     return next(e)
   })
@@ -180,8 +199,8 @@ export const register: Register = on => {
       busy = false
       await schedule($).catch(() => {
         timer = undefined
-        $.ui.status('keptwarm: stopped, run /keptwarm')
-        void $.ui.toast('keptwarm: could not re-arm')
+        $.ui.status('error, run /keptwarm again')
+        void $.ui.toast('keptwarm: stopped by an error')
       })
     }
     return next(e)
@@ -193,13 +212,15 @@ export const register: Register = on => {
     if (e.reason === 'clear') {
       await stop($)
       if (((await $.state.get(win)).value ?? -1) > 0) await $.state.set(win, -1)
+      await afterAutoChange($).catch(() => {}) // /clear starts no session.start: show whether auto is on for the new conversation
     }
     return next(e)
   })
 
   on('command.run', { command: 'keptwarm' }, async ($, e) => {
     const arg = e.args.trim().toLowerCase()
-    const usage = 'Usage: /keptwarm [2h | 30m] | off | status | auto [3h] | auto here [3h] | auto drop | auto list | auto off. Up to 12h.'
+    const usage = 'Usage: /keptwarm [2h], off, status, auto [3h], auto here [3h], auto here off, auto off. Lengths up to 12h.'
+    const others = (stopped: boolean) => `${stopped ? 'This session stopped too; other' : 'Other'} sessions stay warm until their current stop time.`
 
     if (arg === 'off') {
       await stop($)
@@ -218,45 +239,46 @@ export const register: Register = on => {
         w === 0
           ? 'off.'
           : end <= now
-            ? 'not warm.'
+            ? ms > 0
+              ? `idle; your next prompt starts it again (${dur(ms)}).`
+              : 'not being kept warm.'
             : ms > 0
-              ? `warm until ${hhmm(end, now)}, ${dur(ms)} after your last prompt${isAuto ? ' (auto)' : ''}.`
-              : `warm until ${hhmm(end, now)}, not extended by prompts.`
+              ? `kept warm until ${hhmm(end, now)}, ${dur(ms)} after your last prompt${isAuto ? ' (auto)' : ''}.`
+              : `kept warm until ${hhmm(end, now)} (your prompts will not extend it).`
       const all = await $.store.get('auto')
       const global = valid(all) ? all : 0
-      const here = (await projects($))[await project($)]
+      const key = await project($)
+      const here = (await projects($))[key]
       const hereMs = valid(here) ? here : 0
       const auto =
         global && hereMs
-          ? `on, ${dur(hereMs)}, this project; ${dur(global)}, all sessions.`
+          ? `${dur(hereMs)} in this project, ${dur(global)} everywhere else.`
           : hereMs
-            ? `on, ${dur(hereMs)}, this project.`
+            ? `${dur(hereMs)} in this project.`
             : global
-              ? `on, ${dur(global)}, all sessions.`
+              ? `${dur(global)} in every session.`
               : 'off.'
-      return { text: `This session: ${session}\nAuto: ${auto}` }
+      const listed = Object.entries(await projects($))
+        .filter(([, v]) => valid(v))
+        .map(([path, v]) => `${name(path)} ${dur(v)}${path === key ? ' (this one)' : ''}`)
+      return { text: `This session: ${session}\nAuto: ${auto}${listed.length ? `\nAuto projects: ${listed.join(', ')}.` : ''}` }
     }
 
     if (arg === 'auto off') {
       await $.store.delete('auto')
+      const stopped = await afterAutoChange($)
       const listed = valid((await projects($))[await project($)])
-      return { text: `Auto off for all sessions. Sessions already warm run to their end.${listed ? ' This project is still on the list: /keptwarm auto drop.' : ''}` }
+      return { text: `Auto is off for all sessions. ${others(stopped)}${listed ? ' This project is still on the list: /keptwarm auto here off.' : ''}` }
     }
 
-    if (arg === 'auto drop') {
+    if (arg === 'auto here off') {
       const key = await project($)
       const ps = await projects($)
       if (!(key in ps)) return { text: 'This project was not on the auto list.' }
       delete ps[key]
       await $.store.set('projects', ps)
-      return { text: 'Auto dropped for this project. Sessions already warm run to their end.' }
-    }
-
-    if (arg === 'auto list') {
-      const all = await $.store.get('auto')
-      const key = await project($)
-      const items = Object.entries(await projects($)).filter(([, ms]) => valid(ms)).map(([path, ms]) => `${name(path)} ${dur(ms)}${path === key ? ' (this one)' : ''}`)
-      return { text: `Auto, all sessions: ${valid(all) ? dur(all) : 'off'}.\nAuto, projects: ${items.length ? items.join(', ') : 'none'}.` }
+      const stopped = await afterAutoChange($)
+      return { text: `Auto is off for this project. ${others(stopped)}` }
     }
 
     if (arg === 'auto here' || arg.startsWith('auto here ')) {
@@ -267,14 +289,16 @@ export const register: Register = on => {
       const ps = await projects($)
       ps[key] = ms
       await $.store.set('projects', ps)
-      return { text: `Auto on for this project: its sessions stay warm ${dur(ms)} after their last prompt. Each idle session pings about hourly. /keptwarm auto drop to stop.` }
+      await afterAutoChange($)
+      return { text: `Auto is on for this project. Its sessions keep their cache warm for ${dur(ms)} after your last prompt in them; sessions you turned off stay off. Stop with /keptwarm auto here off.` }
     }
 
     if (arg === 'auto' || arg.startsWith('auto ')) {
       const ms = arg === 'auto' ? AUTO_MS : parse(arg.slice(5).trim())
       if (ms === 0) return { text: usage }
       await $.store.set('auto', ms)
-      return { text: `Auto on: every session you have not turned off stays warm ${dur(ms)} after its last prompt. Each idle session pings about hourly. /keptwarm auto off to stop.` }
+      await afterAutoChange($)
+      return { text: `Auto is on. Every session now keeps its cache warm for ${dur(ms)} after your last prompt in it; sessions you turned off stay off. Turn it off with /keptwarm auto off.` }
     }
 
     const ms = arg === '' ? MANUAL_MS : parse(arg)
@@ -283,6 +307,6 @@ export const register: Register = on => {
     await $.state.set(until, (await $.clock.now()) + ms)
     await schedule($)
     const now = await $.clock.now()
-    return { text: `Warm until ${hhmm(now + ms, now)}, ${dur(ms)} after each prompt. /keptwarm off to stop.` }
+    return { text: `Keeping this session's cache warm for ${dur(ms)} after your last prompt (now until ${hhmm(now + ms, now)}). Stop with /keptwarm off.` }
   })
 }

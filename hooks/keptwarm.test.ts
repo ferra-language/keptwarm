@@ -37,6 +37,7 @@ async function boot($: any, on: any, store: Record<string, unknown> = {}, opts: 
     on('session.root', () => ({ value: proj.root ?? proj.current }) as never)
   }
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const startup = statuses.slice() // what the session showed as it started
   const run = async (args: string) =>
     (await $.command.run({ command: 'keptwarm', args, origin: { kind: 'composer' } } as never)).text as string
   // A prompt as the engine raises it: typed by the person unless the origin or flags say otherwise.
@@ -45,10 +46,12 @@ async function boot($: any, on: any, store: Record<string, unknown> = {}, opts: 
   await turn($) // the module's variables outlive a test: start with no turn running and no ping pending
   statuses.length = 0
   toasts.length = 0
-  return { clock, pings, statuses, toasts, run, prompt }
+  return { clock, pings, statuses, toasts, run, prompt, startup }
 }
 
 const last = (a: string[]) => a[a.length - 1] ?? ''
+// A cleared status line reaches the engine as an empty event; nothing is drawn for it.
+const shown = (a: string[]) => a.filter(x => x !== '{}')
 
 test('pings after 50 idle minutes, a finished turn pushes it back, the deadline stops it', async ($, on) => {
   const { clock, pings, toasts, run } = await boot($, on)
@@ -70,7 +73,7 @@ test('pings after 50 idle minutes, a finished turn pushes it back, the deadline 
 
   await clock.advance(300 * MIN)
   expect(pings.length).toBe(2) // the deadline (minute 180) is past: no third ping
-  expect(toasts.some(t => t.includes('keptwarm: ended, session went idle'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped, no prompts for a while'))).toBe(true)
 })
 
 test('a run shorter than 100 minutes still ends cleanly at its deadline', async ($, on) => {
@@ -80,7 +83,7 @@ test('a run shorter than 100 minutes still ends cleanly at its deadline', async 
   expect(toasts.length).toBe(0)
   await clock.advance(2 * MIN)
   expect(pings.length).toBe(0) // the cache from the command still covers 30 minutes
-  expect(toasts.some(t => t.includes('ended'))).toBe(true)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
 
   await run('90m')
   await clock.advance(51 * MIN)
@@ -105,8 +108,8 @@ test('bad or out-of-range input is refused and starts nothing', async ($, on) =>
   }
   await clock.advance(200 * MIN)
   expect(pings.length).toBe(0)
-  expect(await run(' 2 H ')).toContain('Warm until')
-  expect(await run('1m')).toContain('Warm until') // a minute is the shortest
+  expect(await run(' 2 H ')).toContain('Keeping this session')
+  expect(await run('1m')).toContain('Keeping this session') // a minute is the shortest
   await run('off')
 })
 
@@ -114,7 +117,7 @@ test('a second /keptwarm replaces the first run instead of adding a timer', asyn
   const { clock, pings, run } = await boot($, on)
   await run('2h')
   await clock.advance(10 * MIN)
-  expect(await run('12h')).toContain('Warm until') // 12h is the longest accepted length
+  expect(await run('12h')).toContain('Keeping this session') // 12h is the longest accepted length
   await clock.advance(50 * MIN)
   expect(pings.length).toBe(1) // one timer, not two
   await run('off')
@@ -218,9 +221,9 @@ test('a prompt at minute 299 moves the stop to minute 659', async ($, on) => {
   await prompt()
   await turn($)
   await clock.advance(5 * H + 50 * MIN) // minute 649: still inside the moved window
-  expect(toasts.some(t => t.includes('ended'))).toBe(false)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
   await clock.advance(20 * MIN) // minute 669: past 659
-  expect(toasts.some(t => t.includes('ended'))).toBe(true)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
 })
 
 test('only a typed prompt counts as activity', async ($, on) => {
@@ -240,7 +243,7 @@ test('only a typed prompt counts as activity', async ($, on) => {
     await prompt(extra)
   }
   await clock.advance(15 * MIN) // minute 35: the original deadline passed
-  expect(toasts.some(t => t.includes('ended'))).toBe(true)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
 })
 
 test('off sticks for the session even when auto is on and a prompt comes', async ($, on) => {
@@ -255,13 +258,13 @@ test('off sticks for the session even when auto is on and a prompt comes', async
 
 test('auto arms a session on its first real prompt, not before', async ($, on) => {
   const { clock, pings, statuses, run, prompt } = await boot($, on)
-  expect(await run('auto')).toContain('Auto on: every session you have not turned off stays warm 3h')
+  expect(await run('auto')).toContain('Auto is on. Every session now keeps its cache warm for 3h after your last prompt in it')
   await clock.advance(5 * H)
   expect(pings.length).toBe(0) // an unused session never pings
-  expect(statuses.length).toBe(0)
+  expect(statuses.every(x => !x.includes('warm until'))).toBe(true) // and is never shown as warm
   await prompt()
   await turn($)
-  expect(last(statuses)).toMatch(/keptwarm: warm until (\w{3} )?\d\d:\d\d \(auto\)/)
+  expect(last(statuses)).toMatch(/"warm until (\w{3} )?\d\d:\d\d \(auto\)"/)
   await clock.advance(51 * MIN)
   expect(pings.length).toBe(1)
 })
@@ -271,10 +274,10 @@ test('a session-level length beats auto, and auto off stops new arming', async (
   await run('30m')
   await prompt()
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('session went idle'))).toBe(true) // 30m, not the 3h auto window
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true) // 30m, not the 3h auto window
 
   await $.session.end({ reason: 'clear', sessionId: 's2' } as never) // a new conversation: back to following auto
-  expect(await run('auto off')).toContain('Auto off')
+  expect(await run('auto off')).toContain('Auto is off')
   await prompt()
   await clock.advance(3 * H)
   expect(pings.length).toBe(0)
@@ -282,11 +285,13 @@ test('a session-level length beats auto, and auto off stops new arming', async (
 
 test('a v0.3 deadline with no window keeps running as a fixed run', async ($, on) => {
   on('state.get', (_: unknown, e: any) => ({ value: { value: e.key === 'until' ? 3 * H : undefined, version: 1 } }))
-  const { clock, pings, statuses, prompt } = await boot($, on)
+  const { clock, pings, statuses, run, prompt } = await boot($, on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true }) // a reload
   await prompt() // no window, no auto: the old deadline is not moved
   expect(statuses.length).toBeGreaterThan(0)
   expect(last(statuses)).not.toContain('(auto)') // auto is off, so this is not an auto run
+  const text = await run('status')
+  expect(text).toMatch(/^This session: kept warm until \d\d:\d\d \(your prompts will not extend it\)\.\nAuto: off\.$/) // no '0m', no '(auto)'
   await clock.advance(51 * MIN)
   expect(pings.length).toBe(1)
 })
@@ -298,10 +303,10 @@ test('typed prompts from the composer, the bridge and Slack all extend the windo
   for (const kind of ['composer', 'bridge', 'slack-ping']) {
     await clock.advance(20 * MIN)
     await prompt({ origin: { kind } })
-    expect(toasts.some(t => t.includes('ended'))).toBe(false)
+    expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
   }
   await clock.advance(25 * MIN) // 85 minutes in: past the first 30-minute deadline and every unmoved one
-  expect(toasts.some(t => t.includes('ended'))).toBe(false)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
   await run('off')
 })
 
@@ -339,29 +344,51 @@ test('a refused ping shows a failure toast and the run carries on', async ($, on
 test('the weekday shows when the stop time is on another day', async ($, on) => {
   const local = (d: number, h: number) => new Date(2026, 0, d, h, 0).getTime() // Monday 5 Jan 2026, local time
   const { run } = await boot($, on, {}, { now: local(5, 23) })
-  expect(await run('2h')).toMatch(/^Warm until Tue 01:00, 2h after each prompt\./)
-  expect(await run('90m')).toMatch(/^Warm until Tue 00:30, 1\.5h after each prompt\./) // 1.5h, not rounded to 2h
+  expect(await run('2h')).toMatch(/^Keeping this session's cache warm for 2h after your last prompt \(now until Tue 01:00\)\./)
+  expect(await run('90m')).toMatch(/^Keeping this session's cache warm for 1\.5h after your last prompt \(now until Tue 00:30\)\./) // 1.5h, not rounded to 2h
   await run('off')
 })
 
 test('a stale ended line is cleared by the next prompt when nothing is left to slide', async ($, on) => {
-  const { clock, statuses, run, prompt } = await boot($, on, { auto: 1 * H })
-  await prompt()
-  await run('auto off') // the window is now 0 for a session that follows auto
+  // A v0.3 run: a deadline an hour out, no window, auto off. It ends, and later prompts have nothing to slide by.
+  const store: Record<string, number> = { until: 1 * H }
+  on('state.get', (_: unknown, e: any) => ({ value: { value: store[e.key], version: 1 } }))
+  on('state.set', (_: unknown, e: any) => ((store[e.key] = e.value), { value: { isSet: true, version: 2 } }) as never)
+  const { clock, statuses, prompt } = await boot($, on)
+  store.until = 1 * H
+  delete store.win
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true }) // a reload picks the run up
   await clock.advance(61 * MIN)
-  expect(last(statuses)).toMatch(/"keptwarm: ended \d\d:\d\d"/)
+  expect(last(statuses)).toMatch(/"ended \d\d:\d\d"/)
   await prompt()
-  expect(last(statuses)).not.toContain('ended') // cleared, not left up for good
+  expect(last(statuses)).toBe('{}') // cleared, not left up for good
 })
 
-test('status never claims a 0m window or an auto tag that is not true', async ($, on) => {
-  const { run, prompt } = await boot($, on, { auto: 1 * H })
+test('turning auto off stops this session if only auto was running it, and says so', async ($, on) => {
+  const { clock, pings, run, prompt } = await boot($, on, { auto: 1 * H })
   await prompt()
-  await run('auto off')
-  const text = await run('status')
-  expect(text).toContain('not extended by prompts')
-  expect(text).not.toContain('0m')
-  expect(text).not.toContain('(auto)')
+  expect(await run('auto off')).toBe('Auto is off for all sessions. This session stopped too; other sessions stay warm until their current stop time.')
+  expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
+  await clock.advance(3 * H)
+  expect(pings.length).toBe(0)
+})
+
+test('auto off leaves a session you started yourself alone, and so does dropping a project while all-sessions auto is on', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { clock, pings, run, prompt } = await boot($, on, { auto: 3 * H }, { project: where })
+  await run('2h') // this session's own window
+  expect(await run('auto off')).toBe('Auto is off for all sessions. Other sessions stay warm until their current stop time.')
+  await clock.advance(51 * MIN)
+  expect(pings.length).toBe(1) // still being kept warm
+  await turn($) // that ping's own turn
+
+  await $.session.end({ reason: 'clear', sessionId: 'c' } as never) // a fresh conversation: its own 2h window is dropped, it follows auto again
+  await run('auto') // back on for all sessions
+  await run('auto here 1h')
+  await prompt() // armed under the project's 1h window
+  expect(await run('auto here off')).toBe('Auto is off for this project. Other sessions stay warm until their current stop time.')
+  await clock.advance(121 * MIN)
+  expect(pings.length).toBeGreaterThan(1) // all-sessions auto still applies, so it was not stopped
 })
 
 test('a v0.3 deadline is never moved by a prompt, and a prompt at the deadline does not lose its new stop time', async ($, on) => {
@@ -393,7 +420,7 @@ test('a deadline moved while the run is ending is not ended', async ($, on) => {
   const deadline = store.until as number
   trap = true
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('ended'))).toBe(false)
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
   expect(store.until).toBe(deadline + H)
 })
 
@@ -402,7 +429,7 @@ test('a deadline moved while the run is ending is not ended', async ($, on) => {
 test('auto here arms only sessions in that project', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { clock, pings, run, prompt } = await boot($, on, {}, { project: where })
-  expect(await run('auto here')).toContain('Auto on for this project: its sessions stay warm 3h')
+  expect(await run('auto here')).toContain('Auto is on for this project. Its sessions keep their cache warm for 3h after your last prompt in them')
 
   where.current = '/work/beta' // another project's session
   await $.session.end({ reason: 'other', sessionId: 'b' } as never) // the project is read again
@@ -425,27 +452,26 @@ test('a project window beats the global auto, and auto drop removes it', async (
   await run('auto here 30m')
   await prompt()
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('ended'))).toBe(true) // 30m from the project, not the 3h global
+  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true) // 30m from the project, not the 3h global
 
-  expect(await run('auto drop')).toContain('Auto dropped for this project')
-  expect(await run('auto drop')).toBe('This project was not on the auto list.')
+  expect(await run('auto here off')).toContain('Auto is off for this project')
+  expect(await run('auto here off')).toBe('This project was not on the auto list.')
   await run('auto off') // and the global one
   await prompt()
   await clock.advance(5 * H)
   expect(pings.length).toBe(0)
 })
 
-test('status and list name projects by folder, never by full path', async ($, on) => {
+test('status names projects by folder, never by full path', async ($, on) => {
   const where = { current: '/work/alpha' }
   const { run } = await boot($, on, { auto: 3 * H, projects: { '/work/alpha': 2 * H, '/work/beta': 1 * H } }, { project: where })
-  expect(await run('status')).toBe('This session: not warm.\nAuto: on, 2h, this project; 3h, all sessions.')
-  const list = await run('auto list')
-  expect(list).toBe('Auto, all sessions: 3h.\nAuto, projects: alpha 2h (this one), beta 1h.')
-  expect(list).not.toContain('/work')
+  const status = await run('status')
+  expect(status).toBe('This session: idle; your next prompt starts it again (2h).\nAuto: 2h in this project, 3h everywhere else.\nAuto projects: alpha 2h (this one), beta 1h.')
+  expect(status).not.toContain('/work')
   await run('auto here')
   await run('auto off')
-  expect(await run('status')).toContain('Auto: on, 3h, this project.')
-  expect(await run('auto off')).toContain('This project is still on the list: /keptwarm auto drop.')
+  expect(await run('status')).toContain('Auto: 3h in this project.')
+  expect(await run('auto off')).toContain('This project is still on the list: /keptwarm auto here off.')
   expect(await run('off')).toContain('Auto still applies to other sessions.') // projects count as auto too
 })
 
@@ -453,26 +479,26 @@ test('per-project input is checked, and a session that cannot name its project s
   const where = { current: '/work/alpha' }
   const { run } = await boot($, on, {}, { project: where })
   for (const arg of ['auto here 13h', 'auto here banana', 'auto here 0m']) expect(await run(arg)).toContain('Usage')
-  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+  expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
   where.current = '' // the engine could not tell
   await $.session.end({ reason: 'other', sessionId: 'x' } as never)
   expect(await run('auto here')).toBe('Could not tell which project this is, so nothing was saved.')
-  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+  expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
 })
 
 test('the project is the repository root, else the folder, and follows a /cd at once', async ($, on) => {
   const where: { current: string; repo?: string | null; root?: string } = { current: '/work/main', root: '/work/main-wt' }
   const { run } = await boot($, on, {}, { project: where })
   await run('auto here')
-  expect(await run('auto list')).toContain('Auto, projects: main 3h (this one).') // a worktree maps to the main tree's root
+  expect(await run('status')).toContain('Auto projects: main 3h (this one).') // a worktree maps to the main tree's root
 
   where.repo = null // not in a repository: the session's own folder is the project
   where.root = '/work/plain'
   await run('auto here 1h')
-  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: main 3h, plain 1h (this one).')
+  expect(await run('status')).toContain('Auto projects: main 3h, plain 1h (this one).')
 
   where.root = '/work/elsewhere' // a /cd with no session.end: no stale project
-  expect(await run('auto list')).not.toContain('(this one)')
+  expect(await run('status')).not.toContain('(this one)')
 })
 
 test('auto here and auto drop leave every other project alone', async ($, on) => {
@@ -481,17 +507,16 @@ test('auto here and auto drop leave every other project alone', async ($, on) =>
   await run('auto here')
   where.current = '/work/beta'
   await run('auto here 2h')
-  expect(await run('auto list')).toContain('Auto, projects: alpha 3h, beta 2h (this one).')
-  await run('auto drop')
-  expect(await run('auto list')).toContain('Auto, projects: alpha 3h.')
+  expect(await run('status')).toContain('Auto projects: alpha 3h, beta 2h (this one).')
+  await run('auto here off')
+  expect(await run('status')).toContain('Auto projects: alpha 3h.')
 })
 
 test('a hand-edited store cannot break it or get past the 12h cap', async ($, on) => {
   const where = { current: '/work/alpha' }
   const store = { projects: { '/work/alpha': '7200000', '/work/beta': 1e300, '/work/gamma': -5, '/work/delta': 0 }, auto: 'soon' }
   const { clock, pings, run, prompt } = await boot($, on, store, { project: where })
-  expect(await run('status')).toBe('This session: not warm.\nAuto: off.')
-  expect(await run('auto list')).toBe('Auto, all sessions: off.\nAuto, projects: none.')
+  expect(await run('status')).toBe('This session: not being kept warm.\nAuto: off.')
   await prompt()
   await clock.advance(5 * H)
   expect(pings.length).toBe(0) // a number written as a string is not a usable window
@@ -502,32 +527,87 @@ test('a hand-edited store cannot break it or get past the 12h cap', async ($, on
   expect(await run('off')).toBe('Off for this session.')
 })
 
+// ---- on or off, always visible ----
+
+test('a session that auto will arm says so as it starts; one that it will not says nothing', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const all = await boot($, on, { auto: 3 * H }, { project: where })
+  expect(last(all.startup)).toContain('"auto on, starts when you type"')
+})
+
+test('no auto, no line: an off session shows nothing', async ($, on) => {
+  const { startup, statuses, run } = await boot($, on)
+  expect(shown(startup).length).toBe(0)
+  await run('off')
+  expect(statuses.every(x => !x.includes('auto on'))).toBe(true)
+})
+
+test('the waiting line follows the auto commands and clears when auto does', async ($, on) => {
+  const where = { current: '/work/alpha' }
+  const { statuses, run } = await boot($, on, {}, { project: where })
+  await run('auto here')
+  expect(last(statuses)).toContain('"auto on, starts when you type"')
+  await run('auto here off')
+  expect(last(statuses)).toBe('{}') // the status was cleared
+  await run('auto')
+  expect(last(statuses)).toContain('starts when you type')
+  await run('off') // off for this session: auto no longer applies to it
+  expect(last(statuses)).toBe('{}')
+  await run('auto here') // changing auto while this session is off must not show it as waiting
+  expect(last(statuses)).toBe('{}')
+  await run('auto off')
+})
+
+test('a project on the list shows the waiting line only in that project', async ($, on) => {
+  const where = { current: '/work/beta' }
+  const { startup } = await boot($, on, { projects: { '/work/alpha': 2 * H } }, { project: where })
+  expect(shown(startup).length).toBe(0)
+})
+
+test('/clear under auto shows the waiting line for the new conversation', async ($, on) => {
+  const { statuses, prompt } = await boot($, on, { auto: 3 * H })
+  await prompt()
+  expect(last(statuses)).toContain('warm until')
+  await $.session.end({ reason: 'clear', sessionId: 'c' } as never) // no session.start follows a /clear
+  expect(last(statuses)).toContain('"auto on, starts when you type"')
+})
+
+test('a run that ended says so honestly: typing starts it again', async ($, on) => {
+  const { clock, run, prompt, statuses } = await boot($, on)
+  await run('30m')
+  await clock.advance(31 * MIN)
+  expect(await run('status')).toBe('This session: idle; your next prompt starts it again (30m).\nAuto: off.')
+  expect(last(statuses)).toContain('type to restart')
+  await prompt()
+  expect(last(statuses)).toMatch(/"warm until \d\d:\d\d"/)
+})
+
 // ---- what the user sees ----
 
 test('status lines and replies read as designed', async ($, on) => {
   const { statuses, toasts, run, clock, prompt } = await boot($, on, { auto: 3 * H })
 
-  expect(await run('status')).toBe('This session: not warm.\nAuto: on, 3h, all sessions.')
+  expect(await run('status')).toBe('This session: idle; your next prompt starts it again (3h).\nAuto: 3h in every session.')
   await prompt()
-  expect(last(statuses)).toMatch(/"keptwarm: warm until (\w{3} )?\d\d:\d\d \(auto\)"/)
-  expect(await run('status')).toMatch(/^This session: warm until \d\d:\d\d, 3h after your last prompt \(auto\)\.\nAuto: on, 3h, all sessions\.$/)
+  expect(last(statuses)).toMatch(/"warm until (\w{3} )?\d\d:\d\d \(auto\)"/)
+  expect(await run('status')).toMatch(/^This session: kept warm until \d\d:\d\d, 3h after your last prompt \(auto\)\.\nAuto: 3h in every session\.$/)
 
-  expect(await run('2h')).toMatch(/^Warm until \d\d:\d\d, 2h after each prompt\. \/keptwarm off to stop\.$/)
+  expect(await run('2h')).toMatch(/^Keeping this session's cache warm for 2h after your last prompt \(now until \d\d:\d\d\)\. Stop with \/keptwarm off\.$/)
   expect(last(statuses)).not.toContain('(auto)')
 
   expect(await run('off')).toBe('Off for this session. Auto still applies to other sessions.')
   expect(await run('status')).toMatch(/^This session: off\./)
-  expect(await run('auto off')).toBe('Auto off for all sessions. Sessions already warm run to their end.')
-  expect(await run('auto 5h')).toContain('stays warm 5h after its last prompt')
-  expect(await run('status')).toContain('Auto: on, 5h, all sessions.')
+  expect(await run('auto off')).toBe('Auto is off for all sessions. Other sessions stay warm until their current stop time.')
+  expect(await run('auto 5h')).toContain('keeps its cache warm for 5h after your last prompt in it')
+  expect(await run('status')).toContain('Auto: 5h in every session.')
   await run('auto off')
   await run('2h')
   await clock.advance(121 * MIN)
-  expect(last(statuses)).toMatch(/"keptwarm: ended \d\d:\d\d"/) // the end time stays up until the next real prompt
-  expect(toasts.some(t => t.includes('keptwarm: ended, session went idle'))).toBe(true)
+  expect(last(statuses)).toMatch(/"ended \d\d:\d\d, type to restart"/) // the end time stays up until the next real prompt, and says typing restarts it
+  expect(toasts.some(t => t.includes('keptwarm: stopped, no prompts for a while'))).toBe(true)
 })
 
-test('every status line and toast is plain ASCII and fits 42 characters', async ($, on) => {
+test('every status line and toast is plain ASCII and fits 42 characters as drawn', async ($, on) => {
   const { statuses, toasts, run, clock, prompt } = await boot($, on, { auto: 3 * H })
   await prompt()
   await run('30m')
@@ -536,13 +616,17 @@ test('every status line and toast is plain ASCII and fits 42 characters', async 
   await $.turn.start({ text: 'x', turnId: 'q', agentId: undefined } as never)
   await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'ok' } as never)
   await run('off')
-  let checked = 0
-  for (const line of [...statuses, ...toasts]) {
-    const text = (line.match(/"(keptwarm:[^"]*)"/) ?? [])[1]
-    if (text === undefined) continue
-    checked++
-    expect(text.length).toBeLessThanOrEqual(42)
-    expect(/^[\x20-\x7e]*$/.test(text)).toBe(true)
+  // The engine draws a status line as "keptwarm: <text>", a toast as written.
+  const drawn = (line: string, prefix: string, limit: number) => {
+    const text = (line.match(/"([^"]+)"\}?$/) ?? [])[1]
+    return text === undefined ? undefined : { text: prefix + text, limit }
   }
-  expect(checked).toBeGreaterThan(3)
+  // A status also gets a 2-character warning glyph from the engine, so it has 40 left.
+  const lines = [...statuses.map(l => drawn(l, 'keptwarm: ', 40)), ...toasts.map(l => drawn(l, '', 42))].filter((l): l is { text: string; limit: number } => l !== undefined)
+  expect(lines.length).toBeGreaterThan(5)
+  for (const { text, limit } of lines) {
+    expect(text.length).toBeLessThanOrEqual(limit)
+    expect(/^[\x20-\x7e]*$/.test(text)).toBe(true)
+    expect(text.startsWith('keptwarm: keptwarm:')).toBe(false) // the engine adds the name once
+  }
 })
