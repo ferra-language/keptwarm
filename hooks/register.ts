@@ -2,6 +2,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 // ponytail: fixed 50-min wait (1-hour cache TTL); a ping fires only after 50 idle minutes.
 const PING_MS = 50 * 60_000
+const MAX_MS = 24 * 3_600_000
 const PING = 'Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.'
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000 }
 // The deadline lives in $.state so a hot reload resumes the run instead of dropping it.
@@ -16,20 +17,30 @@ async function stop($: EngineInterface) {
   $.ui.status(undefined)
 }
 
-// One ping, PING_MS after the last activity. Each finished turn (the ping's own included) pushes it back.
+// One timer, set PING_MS after the last activity, or at the deadline if that comes first.
+// Every await is done before the old timer is replaced, so two calls can never leave two timers.
 async function schedule($: EngineInterface) {
-  timer?.cancel()
-  timer = undefined
   const end = (await $.state.get(until)).value ?? 0
-  if ((await $.clock.now()) >= end) return
+  const now = await $.clock.now()
+  if (end === 0) return
+  if (now >= end) {
+    await stop($)
+    void $.ui.toast('keptwarm: finished')
+    return
+  }
+  timer?.cancel()
   $.ui.status(`keptwarm until ${new Date(end).toLocaleTimeString()}`)
-  timer = $.clock.after(PING_MS, async () => {
-    if ((await $.clock.now()) + PING_MS > end) {
+  timer = $.clock.after(Math.min(PING_MS, end - now), async () => {
+    // Read again: /keptwarm off or a new length may have landed while this timer waited.
+    const end = (await $.state.get(until)).value ?? 0
+    const now = await $.clock.now()
+    if (end === 0) return
+    if (now >= end - 1000) {
       await stop($)
       void $.ui.toast('keptwarm: finished')
       return
     }
-    void $.prompt.submit({ text: PING })
+    $.prompt.submit({ text: PING }).catch(() => void $.ui.toast('keptwarm: ping failed'))
     await schedule($) // keeps the chain alive if the ping never completes a turn
   })
 }
@@ -39,7 +50,7 @@ export const register: Register = on => {
     await $.command.register({
       name: 'keptwarm',
       description: 'Keep the prompt cache warm for 6h; /keptwarm off to stop',
-      argumentHint: '[12h | 30m | off]',
+      argumentHint: '[6h | 12h | 30m | off]',
     })
     // A reload re-runs this: carry on if a run is still open.
     if (((await $.state.get(until)).value ?? 0) > (await $.clock.now())) {
@@ -50,7 +61,7 @@ export const register: Register = on => {
   })
 
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined && timer) await schedule($)
+    if (e.agentId === undefined) await schedule($)
     return next(e)
   })
 
@@ -62,9 +73,12 @@ export const register: Register = on => {
       return { text: 'keptwarm: off' }
     }
     const m = /^(\d+(?:\.\d+)?)\s*([mh])$/.exec(arg)
-    if (!m) return { text: 'Usage: /keptwarm (6h default) | /keptwarm 12h | /keptwarm off' }
+    const ms = m ? Number(m[1]) * UNITS[m[2]] : 0
+    if (!(ms > 0 && ms <= MAX_MS)) {
+      return { text: 'Usage: /keptwarm (6h default) | /keptwarm 12h | /keptwarm 30m | /keptwarm off. Up to 24h.' }
+    }
 
-    await $.state.set(until, (await $.clock.now()) + Number(m[1]) * UNITS[m[2]])
+    await $.state.set(until, (await $.clock.now()) + ms)
     await schedule($)
     return { text: `keptwarm: on for ${arg}, pings after 50 idle minutes. /keptwarm off to stop.` }
   })
