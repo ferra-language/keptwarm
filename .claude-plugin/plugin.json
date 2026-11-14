@@ -1,6 +1,6 @@
 {
   "name": "keptwarm",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "author": { "name": "ferra-language" },
   "description": "/keptwarm keeps the 1-hour prompt cache warm by sending an automatic ping prompt after 50 idle minutes. Each ping uses tokens or usage limits.",
   "homepage": "https://github.com/ferra-language/keptwarm",

@@ -20,7 +20,7 @@ A Claude Code mod that keeps your session's prompt cache warm. With the 1-hour c
 
 ```
 claude plugin marketplace add ferra-language/keptwarm
-claude plugin install keptwarm@keptwarm --scope user
+claude plugin install keptwarm@ferra-mods --scope user
 ```
 
 The user scope makes `/keptwarm` available in every project. Restart a session, or run `/reload-plugins`, to pick it up.
