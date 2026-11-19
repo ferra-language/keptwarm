@@ -45,28 +45,32 @@ Auto and project are off until you turn them on. Under auto or project a session
 
 ## How it behaves
 
-- **It slides.** Every prompt you type pushes the stop time out to the window from now, so a session you use all day is never cut off, and an idle one stops after the window. A 6-hour window costs at most 7 pings.
-- **Only typed prompts count.** Prompts you type in the terminal or desktop app, and ones from Remote Control or Slack, extend the window. Its own pings, loops, scheduled tasks, background notifications and slash commands never do.
+- **It slides.** Every prompt you type pushes the stop time out to the window from now, so a session you use all day is never cut off, and an idle one stops after the window. A 6-hour window costs at most 7 pings after your last activity.
+- **Long work you started counts too.** When a turn finishes while a run is open, the stop time moves to the window from that moment. So a goal that runs for 6 hours unattended does not use up your window: the session stays warm for the full window after the goal ends, and the cache is still warm when you come back. A turn that begins after the run has ended or been turned off never restarts it, and neither does a session that auto has not armed yet.
+- **Typed prompts start and extend a run.** Prompts you type in the terminal or desktop app, and ones from Remote Control or Slack, do. Typing a slash command does not start one. Its own pings never extend it. Loops, scheduled tasks, background notifications and commands that run a model turn cannot start a run, and can only extend one that is already open, from the end of their turn.
+- **There is a ceiling.** After 14 pings since your last typed prompt the run stops (`capped HH:MM`), even if a loop or goal keeps extending it. That is the most a plain 12-hour run uses, so only runaway cases hit it. Typing starts it again.
 - A ping goes out 50 minutes after your last finished turn. A turn that is running holds it back, and it is re-armed when the turn ends (also when it is interrupted or fails), so while you are working it sends nothing.
-- At the end the status line keeps `keptwarm: ended HH:MM, type to restart` until your next prompt, with a toast when it stops. Typing starts it again, and `/keptwarm status` says so.
+- **The status line says who runs it and what it has cost:** `keptwarm: session to 16:40, 2 pings` (you turned it on for this session), `project to 16:40` (auto for this project) or `all to Sat 16:40` (auto for every session). The ping count is for the current run.
+- At the end the status line keeps `keptwarm: ended HH:MM, type to restart` until your next prompt. When the window runs out, the toast says what the run used, for example `keptwarm: stopped, 6 pings, 2.1M cached` (the tokens the pings read from the cache). Typing starts it again, and `/keptwarm status` says so.
+- **If the machine slept,** the run ends with `cold at HH:MM, type to restart` instead of sending a ping that would pay for a full rebuild while you are away.
 - The deadline is kept in session state, so `/reload-plugins` resumes the run, at your next turn at the latest. A restart or a new session starts clean, and `/clear` ends the run and drops this session's own window, so the auto setting applies again; a session you turned `off` stays off.
 - **Cost.** A cache read costs about a twentieth of a rebuild, so a run of up to about 17 idle hours costs less than one cold rebuild if you do come back; that is why the cap is 12 hours. If you never come back, the pings are pure cost. With auto on, every session you have used pings about hourly until its window ends, which on a subscription uses usage limits and saves no money.
 - Settings hooks and other plugins' `prompt.submit` hooks also run on every ping, and can add to or override its text.
-- If the machine sleeps past the hour, the cache is already cold when the next ping goes out.
+- **Not covered:** while Claude waits for you to answer a permission prompt or a question, the turn has not finished, so no ping goes out and the cache can go cold. The same goes for one tool call or background job that runs over an hour.
 - It assumes the 1-hour cache and cannot tell which cache your setup uses. Where the cache only lasts 5 minutes, a 50-minute ping keeps nothing warm.
 
 ## What it runs, sends and stores
 
-- **The ping** is this exact message, submitted as a normal prompt in the session: `Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.` It adds that message and a short reply to the conversation. It is a real turn, so in a mode that auto-approves tools the model could in principle act on it; the text asks it to reply "ok" only.
+- **The ping** is this exact message, submitted as a normal prompt in the session: `keptwarm keepalive. Reply only: ok` It adds that message and a short reply to the conversation. It is a real turn, so in a mode that auto-approves tools the model could in principle act on it; the text asks it to reply "ok" only.
 - **What goes into the prompt:** only that fixed sentence. The mod never copies your conversation, files, folder names or any other data into a prompt it submits, so a ping cannot carry anything out.
-- **What it listens to:** it hooks `prompt.submit` only to see where each prompt came from (typed by you, or automatic) and whether it is a slash command. It never reads or changes the prompt text; every prompt passes through untouched. It also hooks turn start and end, `/clear` and session start to time the pings, and registers the `/keptwarm` command.
+- **What it listens to:** it hooks `prompt.submit` only to see where each prompt came from (typed by you, or automatic) and whether it is a slash command. It never reads or changes the prompt text; every prompt passes through untouched. It also hooks turn start and end, `/clear` and session start to time the pings, and registers the `/keptwarm` command. At the end of a ping's turn it reads one number, the tokens served from the cache, for the stop toast; it reads nothing else from a turn.
 - **Network:** the mod makes no network requests of its own and has no telemetry. The only thing that leaves your machine is the ping, which goes to Claude like any prompt you type.
 - **Stored locally:** the auto length and the project list (folder paths with their window) in the mod's own store, a `keptwarm_*.json` file in the `plugins/store` folder under your Claude config folder. To reset it, run `/keptwarm auto off` and `/keptwarm project off` in each listed project, or delete that file. `status` shows folder names only, and like any command reply it becomes part of the conversation, so the model sees those names. Keep the store file out of any repository you commit.
 - It does not read your conversation, memory or files.
 
 ## Troubleshooting
 
-- **Status says "warm until" but no ping arrives:** the first ping comes 50 idle minutes after your last finished turn, and a running turn holds it back. A sleeping machine pauses the timer.
+- **The status line shows a stop time but no ping arrives:** the first ping comes 50 idle minutes after your last finished turn, and a running turn holds it back. A sleeping machine pauses the timer, and the run then ends with `cold at HH:MM`.
 - **`ping failed` toast:** the ping could not be submitted. It tries again at the next ping; `/keptwarm off` then `/keptwarm` restarts the run.
 - **`ended HH:MM, type to restart`:** the window ran out with no prompts. Type anything, or run `/keptwarm`, to start it again.
 - **A `⚠` before the status line:** drawn by Claude Code for every plugin status line, not an error.

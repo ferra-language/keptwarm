@@ -2,6 +2,6 @@ export type Deadline = number
 
 declare module 'claude-code' {
   interface PluginState {
-    keptwarm: { until: Deadline; win: number }
+    keptwarm: { until: Deadline; win: number; sent: number; cached: number; since: number }
   }
 }

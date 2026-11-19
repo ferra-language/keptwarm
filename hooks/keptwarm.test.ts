@@ -73,7 +73,7 @@ test('pings after 50 idle minutes, a finished turn pushes it back, the deadline 
 
   await clock.advance(300 * MIN)
   expect(pings.length).toBe(2) // the deadline (minute 180) is past: no third ping
-  expect(toasts.some(t => t.includes('keptwarm: stopped, no prompts for a while'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped, 2 pings'))).toBe(true) // the stop says what the run cost
 })
 
 test('a run shorter than 100 minutes still ends cleanly at its deadline', async ($, on) => {
@@ -83,7 +83,7 @@ test('a run shorter than 100 minutes still ends cleanly at its deadline', async 
   expect(toasts.length).toBe(0)
   await clock.advance(2 * MIN)
   expect(pings.length).toBe(0) // the cache from the command still covers 30 minutes
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true)
 
   await run('90m')
   await clock.advance(51 * MIN)
@@ -223,9 +223,9 @@ test('a prompt at minute 299 moves the stop to minute 659', async ($, on) => {
   await prompt()
   await turn($)
   await clock.advance(5 * H + 50 * MIN) // minute 649: still inside the moved window
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(false)
   await clock.advance(20 * MIN) // minute 669: past 659
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true)
 })
 
 test('only a typed prompt counts as activity', async ($, on) => {
@@ -245,7 +245,7 @@ test('only a typed prompt counts as activity', async ($, on) => {
     await prompt(extra)
   }
   await clock.advance(15 * MIN) // minute 35: the original deadline passed
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true)
 })
 
 test('off sticks for the session even when auto is on and a prompt comes', async ($, on) => {
@@ -266,7 +266,7 @@ test('auto arms a session on its first real prompt, not before', async ($, on) =
   expect(statuses.every(x => !x.includes('warm until'))).toBe(true) // and is never shown as warm
   await prompt()
   await turn($)
-  expect(last(statuses)).toMatch(/"warm until (\w{3} )?\d\d:\d\d \(auto\)"/)
+  expect(last(statuses)).toMatch(/"all to (\w{3} )?\d\d:\d\d"/)
   await clock.advance(51 * MIN)
   expect(pings.length).toBe(1)
 })
@@ -276,7 +276,7 @@ test('a session-level length beats auto, and auto off stops new arming', async (
   await run('30m')
   await prompt()
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true) // 30m, not the 3h auto window
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true) // 30m, not the 3h auto window
 
   await $.session.end({ reason: 'clear', sessionId: 's2' } as never) // a new conversation: back to following auto
   expect(await run('auto off')).toContain('Auto is off')
@@ -305,10 +305,10 @@ test('typed prompts from the composer, the bridge and Slack all extend the windo
   for (const kind of ['composer', 'bridge', 'slack-ping']) {
     await clock.advance(20 * MIN)
     await prompt({ origin: { kind } })
-    expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
+    expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(false)
   }
   await clock.advance(25 * MIN) // 85 minutes in: past the first 30-minute deadline and every unmoved one
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(false)
   await run('off')
 })
 
@@ -422,7 +422,7 @@ test('a deadline moved while the run is ending is not ended', async ($, on) => {
   const deadline = store.until as number
   trap = true
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(false)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(false)
   expect(store.until).toBe(deadline + H)
 })
 
@@ -454,7 +454,7 @@ test('a project window beats the global auto, and auto drop removes it', async (
   await run('project 30m')
   await prompt()
   await clock.advance(31 * MIN)
-  expect(toasts.some(t => t.includes('stopped, no prompts'))).toBe(true) // 30m from the project, not the 3h global
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true) // 30m from the project, not the 3h global
 
   expect(await run('project off')).toContain('Auto is off for this project')
   expect(await run('project off')).toBe('This project was not on the auto list.')
@@ -569,7 +569,7 @@ test('a project on the list shows the waiting line only in that project', async 
 test('/clear under auto shows the waiting line for the new conversation', async ($, on) => {
   const { statuses, prompt } = await boot($, on, { auto: 3 * H })
   await prompt()
-  expect(last(statuses)).toContain('warm until')
+  expect(last(statuses)).toContain('all to')
   await $.session.end({ reason: 'clear', sessionId: 'c' } as never) // no session.start follows a /clear
   expect(last(statuses)).toContain('"auto on, starts when you type"')
 })
@@ -581,7 +581,7 @@ test('a run that ended says so honestly: typing starts it again', async ($, on) 
   expect(await run('status')).toBe('This session: idle; your next prompt starts it again (30m).\nAuto: off.')
   expect(last(statuses)).toContain('type to restart')
   await prompt()
-  expect(last(statuses)).toMatch(/"warm until \d\d:\d\d"/)
+  expect(last(statuses)).toMatch(/"session to \d\d:\d\d"/)
 })
 
 // ---- what the user sees ----
@@ -591,11 +591,11 @@ test('status lines and replies read as designed', async ($, on) => {
 
   expect(await run('status')).toBe('This session: idle; your next prompt starts it again (3h).\nAuto: 3h in every session.')
   await prompt()
-  expect(last(statuses)).toMatch(/"warm until (\w{3} )?\d\d:\d\d \(auto\)"/)
+  expect(last(statuses)).toMatch(/"all to (\w{3} )?\d\d:\d\d"/)
   expect(await run('status')).toMatch(/^This session: kept warm until \d\d:\d\d, 3h after your last prompt \(auto\)\.\nAuto: 3h in every session\.$/)
 
   expect(await run('2h')).toMatch(/^Keeping this session's cache warm for 2h after your last prompt \(now until \d\d:\d\d\)\. Stop with \/keptwarm off\.$/)
-  expect(last(statuses)).not.toContain('(auto)')
+  expect(last(statuses)).toMatch(/"session to /)
 
   expect(await run('off')).toBe('Off for this session. Auto still applies to other sessions.')
   expect(await run('status')).toMatch(/^This session: off\./)
@@ -606,7 +606,7 @@ test('status lines and replies read as designed', async ($, on) => {
   await run('2h')
   await clock.advance(121 * MIN)
   expect(last(statuses)).toMatch(/"ended \d\d:\d\d, type to restart"/) // the end time stays up until the next real prompt, and says typing restarts it
-  expect(toasts.some(t => t.includes('keptwarm: stopped, no prompts for a while'))).toBe(true)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(true)
 })
 
 test('every status line and toast is plain ASCII and fits 42 characters as drawn', async ($, on) => {
@@ -631,4 +631,142 @@ test('every status line and toast is plain ASCII and fits 42 characters as drawn
     expect(/^[\x20-\x7e]*$/.test(text)).toBe(true)
     expect(text.startsWith('keptwarm: keptwarm:')).toBe(false) // the engine adds the name once
   }
+})
+
+// ---- 0.9: long turns extend the run, sleep, totals ----
+
+test('a long unattended turn extends the window from its end, so the cache stays warm after it', async ($, on) => {
+  const { clock, pings, toasts, run } = await boot($, on)
+  await run('6h')
+  await clock.advance(10 * MIN)
+  await $.turn.start({ text: '', turnId: 'goal', agentId: undefined } as never) // a goal: no typed prompt, runs for 6 hours
+  await clock.advance(6 * H)
+  expect(pings.length).toBe(0)
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  expect(toasts.some(t => t.includes('keptwarm: stopped'))).toBe(false) // the run was not over when the goal ended
+  await clock.advance(49 * MIN)
+  expect(pings.length).toBe(0)
+  await clock.advance(2 * MIN)
+  expect(pings.length).toBe(1) // still being kept warm for the person who is away
+  await run('off')
+})
+
+test("keptwarm's own ping never extends the run", async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('3h')
+  for (let i = 0; i < 6; i++) {
+    await clock.advance(50 * MIN)
+    await turn($) // each ping's own turn
+  }
+  expect(pings.length).toBe(3) // pings at 50, 100 and 150, then stopped at 180 although every ping ended a turn
+})
+
+test('a turn after the run ended, or after off, does not restart it', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('30m')
+  await clock.advance(31 * MIN) // ended
+  await turn($)
+  await clock.advance(3 * H)
+  expect(pings.length).toBe(0)
+
+  await run('6h')
+  await $.turn.start({ text: 'job', turnId: 'j', agentId: undefined } as never)
+  await run('off') // off while the turn runs
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  await clock.advance(3 * H)
+  expect(pings.length).toBe(0)
+})
+
+test('an auto session nobody typed in is not armed by a turn that runs on its own', async ($, on) => {
+  const { clock, pings } = await boot($, on, { auto: 3 * H })
+  await turn($) // a loop or a scheduled task
+  await clock.advance(5 * H)
+  expect(pings.length).toBe(0)
+})
+
+test('an aborted long turn extends the run too', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('2h')
+  await $.turn.start({ text: 'job', turnId: 'j', agentId: undefined } as never)
+  await clock.advance(90 * MIN)
+  await $.turn.complete({ agentId: undefined, reason: 'aborted', answer: '' } as never)
+  await clock.advance(51 * MIN)
+  expect(pings.length).toBe(1) // minute 141: past the first deadline (120), inside the one moved at minute 90
+  await run('off')
+})
+
+test('a timer that fires long after it was due ends the run instead of paying for a cold rebuild', async ($, on) => {
+  const store: Record<string, number> = {}
+  let stall: Promise<void> | undefined
+  let clockRef: { sleep(ms: number): Promise<void> } | undefined
+  on('state.get', async (_: unknown, e: any) => {
+    if (stall === undefined && e.key === 'until' && armed) {
+      armed = false
+      stall = clockRef!.sleep(3 * H) // the machine sleeps while the timer's callback is running
+      await stall
+    }
+    return { value: { value: store[e.key], version: 1 } }
+  })
+  on('state.set', (_: unknown, e: any) => ((store[e.key] = e.value), { value: { isSet: true, version: 2 } }) as never)
+  let armed = false
+  const { clock, pings, toasts, statuses, run } = await boot($, on)
+  clockRef = clock
+  await run('6h')
+  armed = true
+  await clock.advance(50 * MIN) // the timer fires on time, then stalls
+  await clock.advance(3 * H) // and wakes three hours later
+  expect(pings.length).toBe(0)
+  expect(toasts.some(t => t.includes('keptwarm: stopped, cache went cold'))).toBe(true)
+  expect(last(statuses)).toMatch(/"cold at \d\d:\d\d, type to restart"/)
+  expect(JSON.parse(last(statuses)).text.length).toBeLessThanOrEqual(30) // drawn as "keptwarm: <text>" within 40
+})
+
+test('a loop that keeps extending the run is stopped at the ping limit until you type again', async ($, on) => {
+  const { clock, pings, toasts, statuses, run, prompt } = await boot($, on)
+  await run('6h')
+  for (let i = 0; i < 40; i++) {
+    await clock.advance(50 * MIN)
+    await turn($) // the ping's own turn, if one was sent
+    await $.turn.start({ text: 'loop', turnId: 'l', agentId: undefined } as never) // the loop's turn, every cycle, extends the run
+    await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'x' } as never)
+  }
+  expect(pings.length).toBe(14)
+  expect(toasts.some(t => t.includes('keptwarm: stopped, ping limit reached'))).toBe(true)
+  expect(JSON.parse(last(statuses)).text).toMatch(/^capped \d\d:\d\d, type to restart$/)
+  await prompt() // typing starts the run again and the count over
+  await turn($)
+  await clock.advance(51 * MIN)
+  expect(pings.length).toBe(15)
+})
+
+test('/clear forgets a ping that never ran, so the next turn is not taken for it', async ($, on) => {
+  const { clock, pings, run } = await boot($, on)
+  await run('6h')
+  await clock.advance(50 * MIN) // ping sent, its turn never starts
+  await $.session.end({ reason: 'clear', sessionId: 's' } as never)
+  await run('6h') // a new run in the cleared conversation
+  await clock.advance(51 * MIN) // no turn in between: a stuck "ping pending" mark would block this ping
+  expect(pings.length).toBe(2)
+  await run('off')
+})
+
+test('the stop toast and the status line say how many pings the run used', async ($, on) => {
+  const { clock, toasts, statuses, run } = await boot($, on)
+  await run('3h')
+  await clock.advance(50 * MIN) // ping 1
+  await $.turn.start({ text: 'ping', turnId: 'p', agentId: undefined } as never)
+  await $.turn.complete({ agentId: undefined, reason: 'answer', answer: 'ok', usage: { cache_read_input_tokens: 1_500_000 } } as never)
+  expect(statuses.some(s => s.includes('session to') && s.includes('1 ping'))).toBe(true)
+  await clock.advance(4 * H)
+  expect(toasts.some(t => t.includes('keptwarm: stopped, 2 pings, 1.5M cached'))).toBe(true) // the second ping never ran a turn, so it adds no tokens
+})
+
+test('a deadline left behind by a process that died is cleared at start', async ($, on) => {
+  const store: Record<string, number> = { until: 1 * H }
+  on('state.get', (_: unknown, e: any) => ({ value: { value: store[e.key], version: 1 } }))
+  on('state.set', (_: unknown, e: any) => ((store[e.key] = e.value), { value: { isSet: true, version: 2 } }) as never)
+  await boot($, on, {}, { now: 5 * H })
+  store.until = 1 * H
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(store.until).toBe(0)
 })

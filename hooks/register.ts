@@ -8,7 +8,11 @@ const MIN = 60_000
 const MAX_MS = 12 * H
 const MANUAL_MS = 6 * H
 const AUTO_MS = 3 * H
-const PING = 'Cache keepalive from the keptwarm mod. Reply with just "ok" and do nothing else.'
+const PING = 'keptwarm keepalive. Reply only: ok'
+// A ping is due at 50 minutes and the cache lasts 60, so one this much later than planned means the machine slept: the cache is cold.
+const LATE_MS = 8 * MIN
+// Pings allowed since your last typed prompt, however often loops, tasks or goals extend the run. A plain 12-hour run needs 14.
+const MAX_PINGS = 14
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
 // Only a prompt a person types counts as activity: never our own pings, loops, tasks, peers or the SDK.
 const REAL_ORIGINS = ['composer', 'bridge', 'slack-ping']
@@ -18,9 +22,19 @@ const REAL_ORIGINS = ['composer', 'bridge', 'slack-ping']
 const until = { plugin: 'keptwarm', key: 'until' } as const
 const win = { plugin: 'keptwarm', key: 'win' } as const
 
+// This run's totals, for the status line and the stop toast.
+const sent = { plugin: 'keptwarm', key: 'sent' } as const
+const cached = { plugin: 'keptwarm', key: 'cached' } as const
+const since = { plugin: 'keptwarm', key: 'since' } as const // pings since your last typed prompt: the runaway limit
+
 let timer: { cancel(): void } | undefined
 let busy = false // a main-thread turn is running: it keeps the cache warm, and its end re-arms the timer
 let pingPending = false // a ping was submitted and no turn has started for it yet
+let pingTurn = false // the turn now running is keptwarm's own ping: it must not extend the run
+let liveAtStart = false // a run was open when the running turn began: only then may its end extend the run
+let due = 0 // when the timer should fire; 0 when unknown (after a reload)
+
+const tokens = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 
 // Fixed formatting, so it never depends on the machine's locale.
 function hhmm(ms: number, now: number) {
@@ -60,34 +74,64 @@ async function projects($: EngineInterface): Promise<Record<string, number>> {
 
 const name = (path: string) => path.split(/[\\/]/).filter(Boolean).pop() ?? path
 
-// The window this session slides by right now (its own, else this project's, else the global auto), and whether auto gave it.
+// The window this session slides by right now (its own, else this project's, else the global auto), and who gave it.
 async function window_($: EngineInterface) {
   const w = (await $.state.get(win)).value ?? -1
-  if (w >= 0) return { ms: w, isAuto: false }
+  if (w >= 0) return { ms: w, isAuto: false, scope: 'session' }
   const here = (await projects($))[await project($)]
-  if (valid(here)) return { ms: here, isAuto: true }
+  if (valid(here)) return { ms: here, isAuto: true, scope: 'project' }
   const auto = await $.store.get('auto')
   const ms = valid(auto) ? auto : 0
-  return { ms, isAuto: ms > 0 }
+  return { ms, isAuto: ms > 0, scope: ms > 0 ? 'all' : 'session' }
+}
+
+// "session to 16:40, 2 pings": who runs it, when it stops, how many pings this run has used. At most 30 characters.
+async function line($: EngineInterface, end: number, now: number) {
+  const { scope } = await window_($)
+  const n = (await $.state.get(sent)).value ?? 0
+  return `${scope} to ${hhmm(end, now)}${n > 0 ? `, ${n > 99 ? '99+' : n} ping${n === 1 ? '' : 's'}` : ''}`
+}
+
+// The run's totals for the stop toast, then the counters start over.
+async function totals($: EngineInterface) {
+  const n = (await $.state.get(sent)).value ?? 0
+  const c = (await $.state.get(cached)).value ?? 0
+  await $.state.set(sent, 0)
+  await $.state.set(cached, 0)
+  return n > 0 ? `${n} ping${n === 1 ? '' : 's'}${c > 0 ? `, ${tokens(c)} cached` : ''}` : ''
 }
 
 async function stop($: EngineInterface) {
   timer?.cancel()
   timer = undefined
+  pingPending = false // a ping that was waiting will not run, or runs as a plain turn: never mistake the next turn for it
+  pingTurn = false
+  liveAtStart = false
   await $.state.set(until, 0)
+  await $.state.set(sent, 0)
+  await $.state.set(cached, 0)
+  await $.state.set(since, 0)
   $.ui.status(undefined)
 }
 
-// The deadline passed with no prompt: leave the end time on the status line until the next real prompt.
-async function finish($: EngineInterface, end: number) {
+// The run is over: leave the end time on the status line until the next real prompt.
+// `why` is 'cold' when the cache already lapsed (the machine slept) and 'limit' at the ping limit; both stop now, not at the deadline.
+async function finish($: EngineInterface, end: number, why?: 'cold' | 'limit') {
   // A prompt may have moved the deadline while we were getting here: then this run is not over.
   if (((await $.state.get(until)).value ?? 0) !== end) return
   const { ms } = await window_($)
+  const stamp = why ? await $.clock.now() : end
+  // Check again and clear in one step: a prompt that moved the deadline during the reads above wins.
+  if (((await $.state.get(until)).value ?? 0) !== end) return
+  await $.state.set(until, 0)
   timer?.cancel()
   timer = undefined
-  await $.state.set(until, 0)
-  $.ui.status(`ended ${hhmm(end, end)}${ms > 0 ? ', type to restart' : ''}`)
-  void $.ui.toast('keptwarm: stopped, no prompts for a while')
+  const used = await totals($)
+  const more = ms > 0 ? ', type to restart' : ''
+  $.ui.status(why === 'cold' ? `cold at ${hhmm(stamp, stamp)}${more}` : why === 'limit' ? `capped ${hhmm(stamp, stamp)}${more}` : `ended ${hhmm(stamp, stamp)}${more}`)
+  void $.ui.toast(
+    why === 'cold' ? 'keptwarm: stopped, cache went cold' : why === 'limit' ? 'keptwarm: stopped, ping limit reached' : `keptwarm: stopped, ${used || 'no prompts for a while'}`,
+  )
 }
 
 // One timer, set PING_MS after the last activity, or at the deadline if that comes first.
@@ -95,32 +139,58 @@ async function finish($: EngineInterface, end: number) {
 async function schedule($: EngineInterface) {
   const end = (await $.state.get(until)).value ?? 0
   const now = await $.clock.now()
-  const { isAuto } = await window_($)
   if (end === 0 || busy) return
   if (now >= end) {
     await finish($, end)
     return
   }
+  const text = await line($, end, now) // every await is done before the old timer is replaced
   timer?.cancel()
-  $.ui.status(`warm until ${hhmm(end, now)}${isAuto ? ' (auto)' : ''}`)
-  timer = $.clock.after(Math.min(PING_MS, end - now), async () => {
+  const delay = Math.min(PING_MS, end - now)
+  due = now + delay
+  $.ui.status(text)
+  timer = $.clock.after(delay, async () => {
     // Read again: /keptwarm off or a new length may have landed while this timer waited.
     const now = await $.clock.now()
     const end = (await $.state.get(until)).value ?? 0 // read last: an off or a new length that landed earlier wins
     if (end === 0 || busy) return
+    if (due > 0 && (await $.clock.now()) - due > LATE_MS) {
+      // Fired long after it was due: the machine slept past the hour. Pinging would pay for a full rebuild nobody is waiting on.
+      await finish($, end, 'cold')
+      return
+    }
     if (now >= end - 1000) {
       await finish($, end)
       return
     }
+    const sinceTyped = (await $.state.get(since)).value ?? 0
+    if (sinceTyped >= MAX_PINGS) {
+      // Loops, tasks or a goal kept extending the run: stop paying for it until you type again.
+      await finish($, end, 'limit')
+      return
+    }
     if (!pingPending) {
-      pingPending = true // a session that never goes idle queues one ping, not one per cycle
+      const count = (d: number) => $.state.get(sent).then(s => $.state.set(sent, Math.max(0, (s.value ?? 0) + d)))
+      await count(1)
+      await $.state.set(since, sinceTyped + 1)
+      if (busy) {
+        // You started a turn while this was being counted: that turn keeps the cache warm, so no ping and no charge.
+        await count(-1)
+        await $.state.set(since, sinceTyped)
+        return
+      }
+      pingPending = true // a session that never goes idle queues one ping, not one per cycle; set just before the submit, so a turn you start meanwhile is not taken for it
       $.prompt
         .submit({ text: PING })
         .then(r => {
-          if (r.drop !== undefined) pingPending = false
+          if (r.drop !== undefined) {
+            pingPending = false
+            return count(-1) // a dropped ping never ran: it did not cost or warm anything
+          }
         })
         .catch(() => {
           pingPending = false
+          void count(-1)
           $.ui.status(`until ${hhmm(end, now)}, ping failed`)
           void $.ui.toast('keptwarm: ping failed, retry at next ping')
         })
@@ -136,6 +206,12 @@ async function slide($: EngineInterface) {
     // Nothing to slide by: a stale "ended" line has had its say, and a running deadline stays as it is.
     if (((await $.state.get(until)).value ?? 0) === 0) $.ui.status(undefined)
     return
+  }
+  await $.state.set(since, 0) // you are here: the runaway limit starts over
+  // A prompt that starts a run (none was open) starts its totals from zero.
+  if (((await $.state.get(until)).value ?? 0) === 0) {
+    await $.state.set(sent, 0)
+    await $.state.set(cached, 0)
   }
   await $.state.set(until, (await $.clock.now()) + ms)
   await schedule($)
@@ -171,6 +247,8 @@ export const register: Register = on => {
       await schedule($)
       void $.ui.toast(`keptwarm: resumed, warm until ${hhmm(end, now)}`)
     } else {
+      // A deadline left behind by a process that died: clear it, so a later turn cannot extend a run that is over.
+      if (end !== 0) await $.state.set(until, 0)
       await afterAutoChange($).catch(() => {})
     }
     return next(e)
@@ -184,10 +262,12 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // A running turn keeps the cache warm itself: hold the timer until it completes.
-  on('turn.start', ($, e, next) => {
+  on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       busy = true
+      pingTurn = pingPending // the first turn after our ping is the ping's own
       pingPending = false
+      liveAtStart = ((await $.state.get(until)).value ?? 0) > (await $.clock.now())
       timer?.cancel()
       timer = undefined
     }
@@ -197,6 +277,21 @@ export const register: Register = on => {
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined) {
       busy = false
+      const own = pingTurn
+      const live = liveAtStart
+      pingTurn = false
+      liveAtStart = false
+      // A turn ending is the cache being read just now. A goal, a loop or a long job you started keeps the session
+      // in use while you are away, so the window counts from its end. Our own ping never does, and neither does a
+      // turn that began after the run had ended or been turned off.
+      if (own) {
+        const c = e.usage?.cache_read_input_tokens ?? 0
+        if (c > 0) await $.state.set(cached, ((await $.state.get(cached)).value ?? 0) + c)
+      } else if (live && ((await $.state.get(until)).value ?? 0) > 0) {
+        const { ms } = await window_($)
+        // Read the deadline again right before writing: an off or a stop that landed meanwhile must stay stopped.
+        if (ms > 0 && ((await $.state.get(until)).value ?? 0) > 0) await $.state.set(until, (await $.clock.now()) + ms)
+      }
       await schedule($).catch(() => {
         timer?.cancel()
         timer = undefined
@@ -226,8 +321,8 @@ export const register: Register = on => {
     if (arg === 'help' || arg === '?') return { text: usage }
 
     if (arg === 'off') {
+      await $.state.set(win, 0) // first, so a turn ending right now sees no window and cannot restart the run
       await stop($)
-      await $.state.set(win, 0)
       const auto = await $.store.get('auto')
       const autoOn = valid(auto) || Object.values(await projects($)).some(valid)
       return { text: `Off for this session.${autoOn ? ' Auto still applies to other sessions.' : ''}` }
@@ -307,6 +402,9 @@ export const register: Register = on => {
     const ms = arg === '' ? MANUAL_MS : parse(arg)
     if (ms === 0) return { text: usage }
     await $.state.set(win, ms)
+    await $.state.set(sent, 0)
+    await $.state.set(cached, 0)
+    await $.state.set(since, 0)
     await $.state.set(until, (await $.clock.now()) + ms)
     await schedule($)
     const now = await $.clock.now()
